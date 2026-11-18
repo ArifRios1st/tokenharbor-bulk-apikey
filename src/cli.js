@@ -7,9 +7,10 @@
  * Every key is proven with a live chat-200 (two different prompts) before it is written.
  *
  * Flow per account:
- *   mailbox → signup (Next.js server action, ids read live from the page) → e-mail
- *   verification link → free-models consent (the endpoint validates the shown text)
- *   → API key → live chat-200.
+ *   mailbox → signup (Next.js server action, ids read live from the page) → activity
+ *   beacon (/dashboard) → e-mail verification link → free-models consent (shown_text
+ *   read live from the dashboard chunk + /api/me/free-tier, the way the browser's
+ *   modal does) → API key (activity beacons before and after) → live chat-200.
  *
  * When the panel answers "complete the human check", the signup is replayed in a real
  * Chrome (src/solver.js, puppeteer-core, your installed Chrome) and the CLI continues
@@ -412,6 +413,113 @@ async function tzFor(px) {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 }
 
+/** Page-view activity beacon the dashboard sends on every page view (HAR 2026-11-19):
+ * POST, no body, accept-anything header, `origin: BASE`, `referer` = the page URL.
+ * Best-effort: a failed beacon must never fail the account. Returns the status (0 on error). */
+async function activity(px, jar, page) {
+  try {
+    const r = await req(`${BASE}/api/auth/activity?page=${encodeURIComponent(page)}`, {
+      px,
+      jar,
+      method: 'POST',
+      headers: { accept: '*/*', origin: BASE, referer: `${BASE}${page}` },
+      timeoutMs: 20000,
+    });
+    return r.status;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// --- Free-models consent text, read live like the browser does (HAR 2026-11-19) ---
+// The dashboard modal builds shown_text from two live sources and POSTs the modal's
+// innerText:
+//   - model_labels from GET /api/me/free-tier, joined "A, B, C and D"
+//   - five sentences hardcoded in one dashboard JS chunk (module 331251: o/a/Q/p/u)
+// The chunk filename is hashed per deploy, so find it by scanning the dashboard
+// page's script list for the chunk holding the consent strings. consent-text.txt
+// stays as a fallback when the live read fails.
+const CONSENT_MARKER = 'Turning this off stops future free-route collection';
+const CONSENT_OPENERS = {
+  o: 'Token Harbor may keep the requests and responses you send through free models',
+  a: 'Our staff may read free-route conversations',
+  Q: 'We also use the free-route content you share to infer broad interest categories',
+  p: 'Token Harbor does not use paid-route prompts or responses',
+  u: 'Turning this off stops future free-route collection',
+};
+/** Read one double-quoted JS string literal starting at `opener` (escapes unescaped). */
+function jsStringAt(js, opener) {
+  const at = js.indexOf(opener);
+  if (at < 0) return null;
+  let i = at;
+  let out = '';
+  while (i < js.length) {
+    const ch = js[i];
+    if (ch === '\\') {
+      out += js.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+    i++;
+  }
+  if (i >= js.length) return null;
+  try {
+    return JSON.parse(`"${out}"`);
+  } catch (e) {
+    return out;
+  }
+}
+function extractConsentStrings(js) {
+  const s = {};
+  for (const [k, opener] of Object.entries(CONSENT_OPENERS)) {
+    s[k] = jsStringAt(js, opener);
+    if (!s[k]) throw new Error(`consent string ${k} not found in chunk`);
+  }
+  return s;
+}
+function joinModelLabels(labels) {
+  if (!labels.length) return 'selected models';
+  if (labels.length === 1) return labels[0];
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+function assembleConsentText(labels, s) {
+  const first = labels.length
+    ? `${joinModelLabels(labels)} ${labels.length === 1 ? 'is' : 'are'} currently available through explicit free routes.`
+    : 'Selected models are available through explicit free routes, listed as Free on the Models page.';
+  const p1 = `${first} ${s.o} Your consent also covers free models we add later. ${s.a} ${s.Q} ${s.p}`;
+  const p2 = `Turn on free models to start using them. You can turn this off anytime. ${s.u}`;
+  return `${p1}\n\n${p2}`;
+}
+async function fetchConsentText({ px, jar }) {
+  const dash = await req(`${BASE}/dashboard`, { px, jar, headers: { accept: 'text/html' }, timeoutMs: 30000 });
+  if (dash.status !== 200) throw new Error(`dashboard ${dash.status}`);
+  const chunks = [...new Set(dash.text.match(/\/_next\/static\/[^"'()\s]+\.js/g) || [])];
+  let strings = null;
+  for (const c of chunks.slice(0, 40)) {
+    try {
+      const r = await req(BASE + c, { px, headers: { accept: '*/*' }, timeoutMs: 20000 });
+      if (r.status === 200 && r.text.includes(CONSENT_MARKER)) {
+        strings = extractConsentStrings(r.text);
+        break;
+      }
+    } catch (e) {
+      /* next chunk */
+    }
+  }
+  if (!strings) throw new Error('consent chunk not found in dashboard scripts');
+  let labels = [];
+  try {
+    const ft = await req(`${BASE}/api/me/free-tier`, { px, jar, headers: { accept: 'application/json' }, timeoutMs: 20000 });
+    const j = JSON.parse(ft.text);
+    if (Array.isArray(j.model_labels)) labels = j.model_labels;
+  } catch (e) {
+    /* empty labels -> the generic first sentence */
+  }
+  return assembleConsentText(labels, strings);
+}
+
 /** One account end to end. Returns { key, steps }. */
 async function mintOne({ px, pool, index, total, log }) {
   const jar = new Jar();
@@ -464,6 +572,11 @@ async function mintOne({ px, pool, index, total, log }) {
     session = true;
   }
   log(`   signup ${steps.signup} · session ${session ? 'ok' : 'yok'}`);
+  // The dashboard beacons every page view (HAR 2026-11-19). The CLI has no
+  // send-verification-email call (signup itself sends the mail), so the beacon goes
+  // at the equivalent point: session established, before the verification wait.
+  steps.activityDashboard = await activity(px, jar, '/dashboard');
+  log(`   activity /dashboard ${steps.activityDashboard}`);
   const link = await waitLink(mail);
   steps.link = Boolean(link);
   if (!link) throw new Error('verification link did not arrive');
@@ -480,7 +593,17 @@ async function mintOne({ px, pool, index, total, log }) {
   }
   const loc = r.headers.location;
   if (loc) await req(loc.startsWith('http') ? loc : BASE + loc, { px, jar, headers: { accept: 'text/html' } }).catch(() => {});
-  const consentText = fs.readFileSync(CONSENT_TEXT, 'utf8').trim();
+  let consentText;
+  let consentSource = 'file';
+  try {
+    consentText = await fetchConsentText({ px, jar });
+    consentSource = 'live';
+  } catch (e) {
+    consentText = fs.readFileSync(CONSENT_TEXT, 'utf8').trim();
+    log(`   consent text: live read failed (${e.message.slice(0, 70)}) — using ${path.basename(CONSENT_TEXT)}`);
+  }
+  steps.consentSource = consentSource;
+  log(`   consent text ${consentSource} (${consentText.length} chars)`);
   let consent = 0;
   for (let i = 0; i < 3; i++) {
     r = await req(`${BASE}/api/me/privacy`, {
@@ -496,7 +619,9 @@ async function mintOne({ px, pool, index, total, log }) {
   }
   steps.consent = consent;
   log(`   consent ${consent}`);
-  if (consent !== 200) throw new Error(`consent ${consent} ${r.text.slice(0, 80)} (the panel changed its consent text — open the dashboard once and press "Enable free models")`);
+  if (consent !== 200) throw new Error(`consent ${consent} ${r.text.slice(0, 80)} (shown_text source: ${consentSource} — the panel may have changed its consent text; open the dashboard once and press "Enable free models")`);
+  steps.activityKeysBefore = await activity(px, jar, '/dashboard/api-keys');
+  log(`   activity /dashboard/api-keys ${steps.activityKeysBefore}`);
   r = await req(`${BASE}/api/keys`, {
     px,
     jar,
@@ -508,6 +633,8 @@ async function mintOne({ px, pool, index, total, log }) {
   log(`   key ${r.status}`);
   const key = (r.text.match(/thk_live_[A-Za-z0-9_-]{20,}/) || [])[0];
   if (!key) throw new Error(`key ${r.status} ${r.text.slice(0, 120)}`);
+  steps.activityKeysAfter = await activity(px, jar, '/dashboard/api-keys');
+  log(`   activity /dashboard/api-keys ${steps.activityKeysAfter}`);
   // Live proof: two different prompts must both answer 200 with different content.
   // The key exists from here on, so *any* failure inside the gate keeps it in
   // keys-unverified.txt instead of throwing the account away.

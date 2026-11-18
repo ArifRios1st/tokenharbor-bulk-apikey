@@ -45,8 +45,8 @@ Two gates sit after sign-up and both are easy to miss: the API answers
 `:free` route answers `403 free_models_disabled` until the free-models consent is enabled —
 and that consent endpoint **validates the text the client showed** (`shown_text`), so a bare
 `{"free_models_enabled":true}` answers `400 reload_and_retry`. This CLI does all of it,
-reads the Next.js action ids from the live page on every run, and only writes keys that pass
-a live chat-200.
+reads the Next.js action ids and the consent text from the live page on every run, and only
+writes keys that pass a live chat-200.
 
 ## 🎁 Free tier — how much you get
 
@@ -148,9 +148,13 @@ Measured end to end (`node src/cli.js --auto --count 1 --pool proxies.txt`):
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
+   activity /dashboard 200
    verify 307 https://tokenharbor.ai/dashboard?verify=success
+   consent text live (1464 chars)
    consent 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -172,10 +176,15 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    suppressed on purpose), the checkbox is clicked with the mouse, and that browser's session
    cookies are handed back to the CLI.
 4. **E-mail verification** — the link from the mailbox is opened; the token is consumed
-   server-side and answers `307 → /dashboard?verify=success`.
-5. **Free-models consent** — `POST /api/me/privacy` with the consent text the dashboard shows
-   (`src/consent-text.txt`), `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **Key + live gate** — `POST /api/keys`, then two different prompts must both answer 200 with
+   server-side and answers `307 → /dashboard?verify=success`. Right after sign-up, the CLI
+   also sends the dashboard's page-view beacon (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **Free-models consent** — `POST /api/me/privacy` with the consent text read live from the
+   dashboard: the consent sentences in the dashboard JS chunk plus the model list from
+   `GET /api/me/free-tier`, assembled exactly like the browser modal's `innerText`
+   (`src/consent-text.txt` is only the fallback when the live read fails).
+   `screen: "consent_modal"`, `path: "/dashboard"`.
+6. **Key + live gate** — activity beacons (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
+   before and after `POST /api/keys`, then two different prompts must both answer 200 with
    different content before the key is written.
 
 ## ⚙️ CLI options
@@ -230,7 +239,7 @@ mail provider is not the panel), so a slow exit cannot break the mailbox step.
 | `src/cli.js` | the mint / verify / screen CLI |
 | `src/launcher.js` | the menu (`npm start`) |
 | `src/solver.js` | the browser half for the Turnstile widget |
-| `src/consent-text.txt` | the consent text the panel validates |
+| `src/consent-text.txt` | fallback consent text (the live read from the dashboard is tried first) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | router connectors |
 
 ## 🔌 Connect to 9Router
