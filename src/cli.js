@@ -5,6 +5,8 @@
  *
  * One command, no flags: `npm start` → menu → "Mint keys" → count → keys in keys.txt.
  * Every key is proven with a live chat-200 (two different prompts) before it is written.
+ * Every account's login is saved to accounts.txt once its key exists, so the account
+ * can be opened manually in a browser even if the live gate fails.
  *
  * Flow per account:
  *   mailbox → signup (Next.js server action, ids read live from the page) → activity
@@ -32,6 +34,7 @@ const BASE = 'https://tokenharbor.ai';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
 const OUT = path.join(process.cwd(), 'keys.txt');
+const ACCOUNTS_TXT = path.join(process.cwd(), 'accounts.txt');
 // Strict mode: never fall back to a direct request (100% proxy runs).
 const STRICT = process.argv.includes('--strict-proxy');
 const CONSENT_TEXT = path.join(__dirname, 'consent-text.txt');
@@ -520,6 +523,23 @@ async function fetchConsentText({ px, jar }) {
   return assembleConsentText(labels, strings);
 }
 
+/** Save `email:password` for a manual browser login. One line per account,
+ * deduped by e-mail; a failed write must never fail the mint. Returns true
+ * when a new line was written. */
+function saveAccount(email, password) {
+  try {
+    const line = `${email}:${password}`;
+    const known = fs.existsSync(ACCOUNTS_TXT)
+      ? fs.readFileSync(ACCOUNTS_TXT, 'utf8').split(/\r?\n/).map((l) => l.trim())
+      : [];
+    if (known.some((l) => l === line || l.startsWith(email + ':'))) return false;
+    fs.appendFileSync(ACCOUNTS_TXT, line + '\n');
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 /** One account end to end. Returns { key, steps }. */
 async function mintOne({ px, pool, index, total, log }) {
   const jar = new Jar();
@@ -635,6 +655,9 @@ async function mintOne({ px, pool, index, total, log }) {
   if (!key) throw new Error(`key ${r.status} ${r.text.slice(0, 120)}`);
   steps.activityKeysAfter = await activity(px, jar, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysAfter}`);
+  // The account + key exist from here on: save the login so the account can be
+  // opened manually in a browser even if the live gate below fails.
+  if (saveAccount(mail.address, password)) log('   account saved to accounts.txt');
   // Live proof: two different prompts must both answer 200 with different content.
   // The key exists from here on, so *any* failure inside the gate keeps it in
   // keys-unverified.txt instead of throwing the account away.

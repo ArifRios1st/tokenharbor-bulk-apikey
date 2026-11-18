@@ -155,6 +155,7 @@ Measured end to end (`node src/cli.js --auto --count 1 --pool proxies.txt`):
    activity /dashboard/api-keys 200
    key 201
    activity /dashboard/api-keys 200
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -184,7 +185,9 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    (`src/consent-text.txt` is only the fallback when the live read fails).
    `screen: "consent_modal"`, `path: "/dashboard"`.
 6. **Key + live gate** — activity beacons (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
-   before and after `POST /api/keys`, then two different prompts must both answer 200 with
+   before and after `POST /api/keys`. The account login (`email:password`) is saved to
+   `accounts.txt` as soon as the key exists, so the account can be opened manually in a
+   browser even if the live gate fails. Then two different prompts must both answer 200 with
    different content before the key is written.
 
 ## ⚙️ CLI options
@@ -234,6 +237,7 @@ mail provider is not the panel), so a slow exit cannot break the mailbox step.
 | `keys-dead.txt` | keys that stopped answering (from `--verify`) |
 | `keys-unverified.txt` | keys whose live gate could not finish — the account exists, the key is real |
 | `accounts.jsonl` | one line per account: e-mail + step results |
+| `accounts.txt` | account logins (`email:password`), one per account — for manual browser login |
 | `mailtrap.txt` | your Mailtrap API token (one line) |
 | `proxies.txt` | optional proxy list |
 | `src/cli.js` | the mint / verify / screen CLI |
