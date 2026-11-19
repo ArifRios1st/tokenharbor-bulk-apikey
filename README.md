@@ -149,12 +149,13 @@ Measured end to end (`node src/cli.js --auto --count 1 --pool proxies.txt`):
    precheck 200 · human check no
    signup 200 · session ok
    activity /dashboard 200
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
    consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
    activity /dashboard/api-keys 200
    key 201
    activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
    account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
@@ -170,11 +171,12 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    mail.tm / mail.gw are the fallback rails.
 2. **Sign-up** — the Next.js server-action ids (`next-action`, `$ACTION_KEY`,
    `x-deployment-id`) are read from the live page every run, so a panel redeploy does not break
-   the CLI; the device fingerprint and the timezone travel with the request, and the timezone is
-   measured from the exit, not from your machine. If Cloudflare answers the login page with its
-   edge challenge (`Just a moment...`, common on VPN/datacenter exits), the rest of the mint
-   runs inside a real Chrome on the same exit: every request (discover, signup, verify,
-   consent, keys, live gate) goes through the browser's own fetch, because the clearance
+   the CLI; the device fingerprint, the timezone and the age confirmation travel with the
+   request, and the timezone is measured from the exit, not from your machine. If Cloudflare
+   answers the login page with its edge challenge (`Just a moment...`, common on VPN/datacenter
+   exits), the rest of the mint runs inside a real Chrome on the same exit: every request
+   (discover, signup, consent, verify, keys, live gate) goes through the browser's own fetch,
+   because the clearance
    cookie alone is not enough — `cf_clearance` is bound to the solving browser's TLS
    fingerprint, and Node requests stay challenged even with a valid cookie in the jar.
    For SOCKS exits with a username, Chrome goes through a localhost forwarding
@@ -184,18 +186,21 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    (`src/solver.js`, `puppeteer-core` + the Chrome or Brave already installed, or the path in
    `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` is suppressed on purpose), the checkbox
    is clicked with the mouse, and that browser's session cookies are handed back to the CLI.
-4. **E-mail verification** — the link from the mailbox is opened; the token is consumed
-   server-side and answers `307 → /dashboard?verify=success`. Right after sign-up, the CLI
-   also sends the dashboard's page-view beacon (`POST /api/auth/activity?page=%2Fdashboard`).
-5. **Free-models consent** — `POST /api/me/privacy` with the consent text read live from the
+4. **Free-models consent** — `POST /api/me/privacy` with the consent text read live from the
    dashboard: the consent sentences in the dashboard JS chunk plus the model list from
    `GET /api/me/free-tier`, assembled exactly like the browser modal's `innerText`
    (`src/consent-text.txt` is only the fallback when the live read fails).
-   `screen: "consent_modal"`, `path: "/dashboard"`.
+   `screen: "consent_modal"`, `path: "/dashboard"`. This runs before the e-mail
+   verification, the way the browser does it. Right after sign-up, the CLI also sends the
+   dashboard's page-view beacon (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **E-mail verification** — the link from the mailbox is opened; the token is consumed
+   server-side and answers `307 → /dashboard?verify=success`.
 6. **Key + live gate** — activity beacons (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
    before and after `POST /api/keys`. The account login (`email:password`) is saved to
    `accounts.txt` as soon as the key exists, so the account can be opened manually in a
-   browser even if the live gate fails. Then two different prompts must both answer 200 with
+   browser even if the live gate fails. The free tier is then read once
+   (`GET /api/me/free-tier`) and logged in one line, so a minted account's rate-limit state
+   is visible before the gate runs. Then two different prompts must both answer 200 with
    different content before the key is written.
 
 ## ⚙️ CLI options
@@ -214,6 +219,7 @@ node src/cli.js --help
 | `--count <n>` | accounts (and keys) to create, default 1 |
 | `--pool <file>` | proxy list, one exit per line (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); inline `#` comments are fine |
 | `--headless` | run the fallback browser headless (default: off-screen window, which is what the captcha expects) |
+| `--verbose` | show the local proxy's per-connection log (`+conn` / `upstream ok` / `-conn`); without it only the outcome lines show |
 | `--screen` | test the pool against the panel and print live / challenged (cloudflare) / dead per exit; challenged exits can still mint, the mint runs in Chrome on them |
 | `--verify` | live-verify `keys.txt`; dead keys are written to `keys-dead.txt` |
 | `--models` | print the free model ids |

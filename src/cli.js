@@ -8,11 +8,12 @@
  * Every account's login is saved to accounts.txt once its key exists, so the account
  * can be opened manually in a browser even if the live gate fails.
  *
- * Flow per account:
+ * Flow per account (the browser's own order, HAR 2026-11-20):
  *   mailbox → signup (Next.js server action, ids read live from the page) → activity
- *   beacon (/dashboard) → e-mail verification link → free-models consent (shown_text
- *   read live from the dashboard chunk + /api/me/free-tier, the way the browser's
- *   modal does) → API key (activity beacons before and after) → live chat-200.
+ *   beacon (/dashboard) → free-models consent (shown_text read live from the
+ *   dashboard chunk + /api/me/free-tier, the way the browser's modal does) →
+ *   e-mail verification link → API key (activity beacons before and after) →
+ *   free-tier read (logged, for the rate-limit diagnosis) → live chat-200.
  *
  * When the panel answers "complete the human check", the signup is replayed in a real
  * browser (src/solver.js, puppeteer-core, your installed Chrome or Brave) and the CLI
@@ -393,15 +394,18 @@ async function discover(transport) {
   if (!deploy || !action || !actionKey) throw new Error('could not read the signup form ids from the page');
   return { deploy, action, actionKey, html };
 }
-function signupBody({ action, actionKey, fp, tz, email, password, turnstile }) {
+// The field list is the browser's own submission, field for field (HAR
+// 2026-11-20, entry 66): no $ACTION_* fields in the body — the server action
+// is identified by the next-action header alone. _1_age_confirmed is the
+// checkbox the form shows; the CLI used to omit it, the one field-level
+// difference between tool and manual signups, and the prime suspect for tool
+// keys rate-limiting while manual ones do not.
+function signupBody({ fp, tz, email, password, turnstile }) {
   const b = '----WebKitFormBoundary' + rand(16);
   const f = [
-    ['_1_$ACTION_REF_1', ''],
-    ['_1_$ACTION_1:0', JSON.stringify({ id: action, bound: '$@1' })],
-    ['_1_$ACTION_1:1', '["$undefined"]'],
-    ['_1_$ACTION_KEY', actionKey],
     ['_1_device_fingerprint', fp],
     ['_1_timezone', tz],
+    ['_1_age_confirmed', '1'],
     ['_1_next', ''],
     ['_1_email', email],
     ['_1_password', password],
@@ -412,10 +416,12 @@ function signupBody({ action, actionKey, fp, tz, email, password, turnstile }) {
   const body = f.map(([k, v]) => `--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`).join('') + `--${b}--\r\n`;
   return { body, boundary: b };
 }
+// next-router-state-tree as the live browser sends it (HAR 2026-11-20,
+// entry 66): ["",{children:["login",{children:["__PAGE__",{},null,null,0]},null,null,0]},null,null,20]
 const RST =
-  '%5B%22%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C4096%5D%7D%2Cnull%2Cnull%2C4096%5D%7D%2Cnull%2Cnull%2C4116%5D';
+  '%5B%22%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C20%5D';
 async function submitSignup({ transport, ids, fp, tz, email, password, turnstile }) {
-  const { body, boundary } = signupBody({ action: ids.action, actionKey: ids.actionKey, fp, tz, email, password, turnstile });
+  const { body, boundary } = signupBody({ fp, tz, email, password, turnstile });
   return transport.req(`${BASE}/login?mode=signup`, {
     method: 'POST',
     headers: {
@@ -456,6 +462,40 @@ async function activity(transport, page) {
     return r.status;
   } catch (e) {
     return 0;
+  }
+}
+
+// The panel's own view of this account's free tier, read right after the key
+// exists and logged in one line — the numbers that decide whether the key
+// rate-limits. Tool-created accounts rate-limit while manual ones do not
+// (HAR 2026-11-20), so every mint records its account's state here instead
+// of leaving the difference invisible. Best-effort: never fails the mint.
+async function logFreeTier(transport, log) {
+  try {
+    const r = await transport.req(`${BASE}/api/me/free-tier`, {
+      headers: { accept: 'application/json', referer: `${BASE}/dashboard` },
+      timeoutMs: 20000,
+    });
+    if (r.status !== 200) {
+      log(`   free-tier read ${r.status}`);
+      return null;
+    }
+    const j = JSON.parse(r.text);
+    const ft = {
+      unlocked: j.unlocked,
+      activated: j.activated,
+      exhausted: j.exhausted,
+      rpm_limit: j.rpm_limit,
+      req_used: j.req_used,
+      used_pct: j.used_pct,
+      plan: j.plan,
+      campaign: j.campaign,
+    };
+    log(`   free-tier unlocked=${ft.unlocked} activated=${ft.activated} exhausted=${ft.exhausted} rpm_limit=${ft.rpm_limit} req_used=${ft.req_used} used_pct=${ft.used_pct}`);
+    return ft;
+  } catch (e) {
+    log(`   free-tier read failed (${String(e.message).slice(0, 70)})`);
+    return null;
   }
 }
 
@@ -617,7 +657,7 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
     log(`   cloudflare challenge — the clearance only works in the browser, so the rest of this mint runs in Chrome via ${px ? `${px.host}:${px.port}` : 'direct'}`);
     const { openBrowserClient } = require('./solver');
     try {
-      ctx.browserClient = await openBrowserClient({ px, log, headless: !!arg('headless', false), ua: UA });
+      ctx.browserClient = await openBrowserClient({ px, log, headless: !!arg('headless', false), ua: UA, verbose: !!arg('verbose', false) });
     } catch (err) {
       throw new Error(`cloudflare challenge not solved (${err.message.slice(0, 120)})`);
     }
@@ -657,7 +697,7 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
   if (!session) {
     // Browser fallback: the widget's token and the session come from a real page.
     const { signupInBrowser } = require('./solver');
-    const out = await signupInBrowser({ px, email: mail.address, password, log, headless: !!arg('headless', false), jarCookies: jar.entries() });
+    const out = await signupInBrowser({ px, email: mail.address, password, log, headless: !!arg('headless', false), jarCookies: jar.entries(), verbose: !!arg('verbose', false) });
     if (!out || !out.ok) {
       const hasToken = Boolean(mailtrapToken());
       throw new Error(`signup blocked (${(out && out.why) || 'no response'}) — ${hasToken ? 'the panel is refusing sign-ups from this network; retry through a fresh proxy exit (--pool)' : 'the panel asks for a mailbox it trusts; add a Mailtrap token (mailtrap.txt) and retry'}`);
@@ -670,27 +710,14 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
     session = true;
   }
   log(`   signup ${steps.signup} · session ${session ? 'ok' : 'yok'}`);
-  // The dashboard beacons every page view (HAR 2026-11-19). The CLI has no
-  // send-verification-email call (signup itself sends the mail), so the beacon goes
-  // at the equivalent point: session established, before the verification wait.
+  // The browser enables free models before it verifies the e-mail (HAR
+  // 2026-11-20: activity /dashboard, consent POST, send-verification-email,
+  // then the verify click). The CLI follows the same order — consent while
+  // the session is fresh, verification after. Signup itself sends the mail,
+  // so no send-verification-email call is needed before the wait.
   steps.activityDashboard = await activity(transport, '/dashboard');
   log(`   activity /dashboard ${steps.activityDashboard}`);
-  const link = await waitLink(mail);
-  steps.link = Boolean(link);
-  if (!link) throw new Error('verification link did not arrive');
-  let r = await transport.req(link, { headers: { accept: 'text/html' } });
-  steps.verify = r.status;
-  log(`   verify ${r.status} ${r.headers.location || ''}`);
-  // A finished inbox is dead weight: Mailtrap caps an account at 300.
-  if (mail.rail === 'mailtrap' && mail.id) {
-    try {
-      await req(`${mail.api}/inbound/inboxes/${mail.id}`, { px: null, method: 'DELETE', headers: { authorization: `Bearer ${mail.token}`, accept: 'application/json' } });
-    } catch (e) {
-      /* a stuck inbox is swept by the provider later */
-    }
-  }
-  const loc = r.headers.location;
-  if (loc) await transport.req(loc.startsWith('http') ? loc : BASE + loc, { headers: { accept: 'text/html' } }).catch(() => {});
+  let r;
   let consentText;
   let consentSource = 'file';
   try {
@@ -716,6 +743,22 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
   steps.consent = consent;
   log(`   consent ${consent}`);
   if (consent !== 200) throw new Error(`consent ${consent} ${r.text.slice(0, 80)} (shown_text source: ${consentSource} — the panel may have changed its consent text; open the dashboard once and press "Enable free models")`);
+  const link = await waitLink(mail);
+  steps.link = Boolean(link);
+  if (!link) throw new Error('verification link did not arrive');
+  r = await transport.req(link, { headers: { accept: 'text/html' } });
+  steps.verify = r.status;
+  log(`   verify ${r.status} ${r.headers.location || ''}`);
+  // A finished inbox is dead weight: Mailtrap caps an account at 300.
+  if (mail.rail === 'mailtrap' && mail.id) {
+    try {
+      await req(`${mail.api}/inbound/inboxes/${mail.id}`, { px: null, method: 'DELETE', headers: { authorization: `Bearer ${mail.token}`, accept: 'application/json' } });
+    } catch (e) {
+      /* a stuck inbox is swept by the provider later */
+    }
+  }
+  const loc = r.headers.location;
+  if (loc) await transport.req(loc.startsWith('http') ? loc : BASE + loc, { headers: { accept: 'text/html' } }).catch(() => {});
   steps.activityKeysBefore = await activity(transport, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysBefore}`);
   r = await transport.req(`${BASE}/api/keys`, {
@@ -729,6 +772,7 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
   if (!key) throw new Error(`key ${r.status} ${r.text.slice(0, 120)}`);
   steps.activityKeysAfter = await activity(transport, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysAfter}`);
+  steps.freeTier = await logFreeTier(transport, log);
   // The account + key exist from here on: save the login so the account can be
   // opened manually in a browser even if the live gate below fails.
   if (saveAccount(mail.address, password)) log('   account saved to accounts.txt');
@@ -832,6 +876,7 @@ Options
   --pool <file>   proxy list, one exit per line (http://, socks5://, host:port).
                   Without it the CLI runs direct.
   --headless      run the fallback browser headless (default: off-screen window)
+  --verbose       show the local proxy's per-connection log (+conn / upstream / -conn)
   --timeout <s>   per-account timeout (default 300)
   --help          this text
 

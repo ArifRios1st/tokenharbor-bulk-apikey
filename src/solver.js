@@ -150,7 +150,7 @@ function proxyServerArg(px) {
   return `--proxy-server=${scheme}://${creds}${px.host}:${px.port}`;
 }
 
-async function launchBrowser({ px = null, headless = false, log = null, extraArgs = [] } = {}) {
+async function launchBrowser({ px = null, headless = false, log = null, extraArgs = [], verbose = false } = {}) {
   const puppeteer = require('puppeteer-core');
   // The background flags matter on slow proxies: without them the browser phones
   // home (component updates, variations, sync) through the proxy at startup and
@@ -174,9 +174,12 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     // sits on about:blank until the navigation timeout). Node does the same
     // handshake in under a second, so the browser gets a plain no-auth HTTP
     // proxy on localhost and this module forwards upstream.
-    localProxy = await startLocalProxy(px, log);
+    // The proxy's per-connection trail (+conn / upstream ok / -conn) is
+    // verbose-only: without --verbose the mint log stays readable and only
+    // the outcome lines show.
+    localProxy = await startLocalProxy(px, verbose ? log : null);
     args.push(`--proxy-server=http://127.0.0.1:${localProxy.port}`);
-    log && log(`   local proxy on 127.0.0.1:${localProxy.port} -> ${px.host}:${px.port}`);
+    if (verbose) log && log(`   local proxy on 127.0.0.1:${localProxy.port} -> ${px.host}:${px.port}`);
   } else if (px) {
     args.push(proxyServerArg(px));
   }
@@ -324,11 +327,11 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
  * Fill the signup form in a real browser, press the button, and let the page mint
  * both the captcha token and the session. Returns the session cookies.
  */
-async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false, jarCookies = [] }) {
-  const browser = await launchBrowser({ px, headless, log });
+async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false, jarCookies = [], verbose = false }) {
+  const browser = await launchBrowser({ px, headless, log, verbose });
   try {
     const page = await browser.newPage();
-    await proxyAuth(page, px, log);
+    await proxyAuth(page, px, verbose ? log : null);
     // Reuse the CLI session's cookies (e.g. cf_clearance from a pre-solved
     // challenge) so the browser does not face the challenge again.
     if (jarCookies.length) {
@@ -510,12 +513,12 @@ function browserClientFromPage(page, browser) {
  * stack passes. Close the client with client.close() when the mint is done.
  * Throws when the browser cannot launch or the page never clears.
  */
-async function openBrowserClient({ px = null, log = () => {}, headless = false, ua = null } = {}) {
-  const browser = await launchBrowser({ px, headless, log });
+async function openBrowserClient({ px = null, log = () => {}, headless = false, ua = null, verbose = false } = {}) {
+  const browser = await launchBrowser({ px, headless, log, verbose });
   const t0 = Date.now();
   try {
     const page = await browser.newPage();
-    await proxyAuth(page, px, log);
+    await proxyAuth(page, px, verbose ? log : null);
     if (ua) await page.setUserAgent(ua);
     // Block what the challenge never needs (images, fonts, stylesheets): on a
     // slow exit they eat the bandwidth the challenge scripts need. Only when
@@ -590,10 +593,10 @@ async function openBrowserClient({ px = null, log = () => {}, headless = false, 
  * TLS fingerprint and Node requests stay challenged even with the cookie in
  * the jar.
  */
-async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null } = {}) {
+async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null, verbose = false } = {}) {
   let client;
   try {
-    client = await openBrowserClient({ px, log, headless, ua });
+    client = await openBrowserClient({ px, log, headless, ua, verbose });
   } catch (e) {
     return { ok: false, why: e.message };
   }

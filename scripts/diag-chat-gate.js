@@ -142,7 +142,8 @@ async function main() {
     console.log('  proxy: direct');
   }
   const log = (...a) => console.log(...a);
-  const client = await solver.openBrowserClient({ px, log, headless: HEADLESS, ua: UA });
+  // A diagnostic keeps the full proxy trail: verbose is always on here.
+  const client = await solver.openBrowserClient({ px, log, headless: HEADLESS, ua: UA, verbose: true });
   try {
     const res = await client.evaluate(probeChatInPage, { url: `${BASE}/v1/chat/completions`, key, model: MODEL, timeoutMs: TIMEOUT_S * 1000 });
     for (const e of res.events) {
