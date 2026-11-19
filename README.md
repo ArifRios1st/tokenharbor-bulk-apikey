@@ -216,6 +216,17 @@ node src/cli.js --help
 A dying exit never costs an account: sign-up and the live gate both retry on other pool lines,
 and a rate limit (a `429`, or a `200` whose body carries `rate_limit_exceeded`) waits the time the panel names.
 
+If the browser pre-solve is slow, find out whether it is the exit or the code before tuning
+anything:
+
+```bash
+node scripts/diag-browser-proxy.js --proxy lax.socks.ipvanish.com:1080
+```
+
+It times the raw SOCKS5+TLS fetch stage by stage, then the browser through the same exit
+(hostname, resolved IPv4, and `--disable-http2`), then the browser direct, and prints a
+verdict naming the slow part.
+
 ## 🛰️ Behind a proxy
 
 The CLI runs **direct** by default. Put one exit per line in `proxies.txt` (the launcher picks

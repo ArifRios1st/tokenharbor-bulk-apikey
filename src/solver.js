@@ -129,7 +129,7 @@ function findBrowserExecutable() {
   return null;
 }
 
-async function launchBrowser({ px = null, headless = false, log = null } = {}) {
+async function launchBrowser({ px = null, headless = false, log = null, extraArgs = [] } = {}) {
   const puppeteer = require('puppeteer-core');
   // The background flags matter on slow proxies: without them the browser phones
   // home (component updates, variations, sync) through the proxy at startup and
@@ -145,6 +145,7 @@ async function launchBrowser({ px = null, headless = false, log = null } = {}) {
     '--window-size=1280,900',
     '--lang=en-US',
     '--mute-audio',
+    ...extraArgs,
   ];
   if (px) {
     const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
