@@ -579,13 +579,13 @@ async function mintOne({ px, pool, index, total, log }) {
     // VPN/datacenter exits get the edge challenge instead of the form: solve it
     // once in a real Chrome (same exit, same user agent) and carry the clearance
     // cookie into this session, then read the form ids over HTTP as usual.
-    log('   cloudflare challenge — pre-solving it in Chrome');
+    log(`   cloudflare challenge — pre-solving it in the browser via ${px ? `${px.host}:${px.port}` : 'direct'}`);
     const { presolveChallenge } = require('./solver');
     const out = await presolveChallenge({ px, log, headless: !!arg('headless', false), ua: UA });
     if (!out || !out.ok) throw new Error(`cloudflare challenge not solved (${(out && out.why) || 'no response'})`);
     for (const c of out.cookies || []) jar.set(c.name, c.value);
     steps.challenge = 'presolved';
-    log('   challenge pre-solved in Chrome');
+    log('   challenge pre-solved in the browser');
     ids = await discover(px, jar);
   }
   const fp = crypto.randomUUID();
@@ -879,7 +879,7 @@ async function verifyKeys(px, log) {
         lastErr = e;
         const retryable = /proxy CONNECT|ECONNRESET|socket hang up|ETIMEDOUT|EAI_AGAIN|tz unreadable|create another account from this network|Too many sign-ups|signup refused: status 200|cloudflare challenge/i.test(e.message);
         if (!retryable || !px) break;
-        log(`   exit failed (${e.message.slice(0, 60)}) — retrying on another exit`);
+        log(`   exit failed (${e.message.slice(0, 120)}) — retrying on another exit`);
       }
     }
     try {

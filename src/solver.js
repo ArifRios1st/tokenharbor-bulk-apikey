@@ -62,7 +62,21 @@ function findBrowserExecutable() {
 
 async function launchBrowser({ px = null, headless = false } = {}) {
   const puppeteer = require('puppeteer-core');
-  const args = ['--no-first-run', '--no-default-browser-check', '--window-size=1280,900', '--lang=en-US', '--mute-audio'];
+  // The background flags matter on slow proxies: without them the browser phones
+  // home (component updates, variations, sync) through the proxy at startup and
+  // competes with the page itself for the exit.
+  const args = [
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-default-apps',
+    '--window-size=1280,900',
+    '--lang=en-US',
+    '--mute-audio',
+  ];
   if (px) {
     const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
     args.push(`--proxy-server=${scheme}://${px.host}:${px.port}`);
@@ -184,9 +198,11 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
       await page.setCookie(...jarCookies.map((c) => ({ name: c.name, value: c.value, domain: 'tokenharbor.ai', path: '/' }))).catch(() => {});
     }
     try {
-      await page.goto(`${BASE}/signup`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      // 'commit' returns once the response arrives; the selector wait below covers
+      // the rest. 'domcontentloaded' on a slow exit burns the whole timeout here.
+      await page.goto(`${BASE}/signup`, { waitUntil: 'commit', timeout: 90000 });
     } catch (e) {
-      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 60)})` };
+      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
     }
     await page
       .waitForSelector('input[name="email"]', { timeout: 60000 })
@@ -286,9 +302,13 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
     await proxyAuth(page, px);
     if (ua) await page.setUserAgent(ua);
     try {
-      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      // 'commit' returns once the response arrives; the wait below covers the
+      // challenge itself. 'domcontentloaded' on a slow exit burns the whole
+      // timeout here (the challenge page's scripts all come through the proxy).
+      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'commit', timeout: 60000 });
+      log && log(`   browser + page commit in ${Math.round((Date.now() - t0) / 1000)}s`);
     } catch (e) {
-      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 60)})` };
+      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
     }
     // The challenge usually clears itself in a few seconds; wait for the real
     // page instead of sleeping a fixed time. If an interactive checkbox shows
