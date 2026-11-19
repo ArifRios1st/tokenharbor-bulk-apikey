@@ -26,7 +26,7 @@
 
 <div align="center">
 
-**English** · [Türkçe](README.tr.md) · [中文](README.cn.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
+[English](README.md) · [Türkçe](README.tr.md) · [中文](README.cn.md) · [日本語](README.ja.md) · **한국어** · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
 
 </div>
 
@@ -45,7 +45,8 @@ API는 `403 email_verification_required`를 응답하고, 무료 모델 동의�
 모든 `:free` 라우트는 `403 free_models_disabled`를 응답합니다 — 그리고 그 동의 엔드포인트는
 **클라이언트가 표시한 텍스트를 검증**하므로(`shown_text`), `{"free_models_enabled":true}`만
 보내면 `400 reload_and_retry`를 응답합니다. 이 CLI는 이 모든 과정을 처리하고, 매 실행마다
-라이브 페이지에서 Next.js 액션 id를 읽어오며, 라이브 chat-200을 통과한 키만 기록합니다.
+라이브 페이지에서 Next.js 액션 id와 동의 텍스트를 읽어오며, 라이브 chat-200을 통과한 키만
+기록합니다.
 
 ## 🎁 무료 티어 — 얼마나 받을 수 있나
 
@@ -148,9 +149,16 @@ npm start            # 메뉴 → 1) Mint keys → 개수 → 완료
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -165,16 +173,37 @@ done
    공개 mail.tm / mail.gw가 대체 경로입니다.
 2. **가입** — Next.js 서버 액션 id(`next-action`, `$ACTION_KEY`, `x-deployment-id`)를 매
    실행마다 라이브 페이지에서 읽어오므로, 패널이 재배포되어도 CLI가 깨지지 않습니다. 기기
-   지문과 시간대가 요청과 함께 전달되며, 시간대는 사용자 머신이 아니라 출구에서 측정됩니다.
-3. **인간 확인** — 패널이 위젯을 렌더링하면, 실제 Chrome에서 가입을 재생합니다
-   (`src/solver.js`, `puppeteer-core` + 이미 설치된 Chrome; `--enable-automation`은 의도적으로
-   억제됨). 체크박스를 마우스로 클릭하고, 그 브라우저의 세션 쿠키를 CLI로 넘겨줍니다.
-4. **이메일 인증** — 메일함의 링크를 엽니다. 토큰은 서버 측에서 소비되고
-   `307 → /dashboard?verify=success`를 응답합니다.
-5. **무료 모델 동의** — 대시보드가 표시하는 동의 텍스트(`src/consent-text.txt`)와 함께
-   `POST /api/me/privacy`를 호출합니다. `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **키 + 라이브 게이트** — `POST /api/keys` 후, 키가 기록되기 전에 서로 다른 두 프롬프트가
-   모두 서로 다른 내용으로 200을 응답해야 합니다.
+   지문, 시간대, 연령 확인이 요청과 함께 전달되며, 시간대는 사용자 머신이 아니라 출구에서
+   측정됩니다. Cloudflare가 로그인 페이지에 엣지 챌린지(`Just a moment...`, VPN/데이터센터
+   출구에서 흔함)로 응답하면, 나머지 민트는 동일한 출구에서 실제 Chrome 안에서 실행됩니다.
+   모든 요청(발견, 가입, 동의, 인증, 키, 라이브 게이트)이 브라우저 자체의 fetch를 통해
+   나가는데, 이는 클리어런스 쿠키만으로는 부족하기 때문입니다 — `cf_clearance`는 챌린지를
+   해결한 브라우저의 TLS 지문에 바인딩되어 있어, 유효한 쿠키가 jar에 있어도 Node 요청은
+   계속 챌린지에 걸립니다. 사용자 이름이 있는 SOCKS 출구에서는 Chrome이 SOCKS를 직접
+   사용하지 않고 localhost 포워딩 프록시(`src/local-proxy.js`)를 통해 나가는데, 이는
+   Chrome의 SOCKS5 인증 처리가 멈추기 때문입니다.
+3. **인간 확인** — 패널이 위젯을 렌더링하면, 실제 브라우저에서 가입을 재생합니다
+   (`src/solver.js`, `puppeteer-core` + 이미 설치된 Chrome 또는 Brave, 또는 `BRAVE_PATH` /
+   `CHROME_PATH`의 경로; `--enable-automation`은 의도적으로 억제됨). 체크박스를 마우스로
+   클릭하고, 그 브라우저의 세션 쿠키를 CLI로 넘겨줍니다.
+   "Verification failed"를 보고하는 위젯은 재설정하고(가능하면 Turnstile API로, 아니면 클릭해서) 다시 시도합니다. 자동 시도가 계속 실패하면 계정을 실패 처리하는 대신 브라우저 창에서 사람이 챌린지를 풀 때까지 최대 2분간 기다립니다(`--headless` 실행에서는 이 대기를 건너뜁니다).
+4. **무료 모델 동의** — 대시보드에서 라이브로 읽은 동의 텍스트와 함께
+   `POST /api/me/privacy`를 호출합니다. 대시보드 JS 청크의 동의 문장과
+   `GET /api/me/free-tier`의 모델 목록을 브라우저 모달의 `innerText`와 정확히 동일하게
+   조립한 것입니다(`src/consent-text.txt`는 라이브 읽기가 실패할 때만 사용하는 대체
+   수단입니다). `screen: "consent_modal"`, `path: "/dashboard"`. 이는 브라우저와 같은
+   방식으로 이메일 인증보다 먼저 실행됩니다. 가입 직후 CLI는 대시보드의 페이지뷰 비컨
+   (`POST /api/auth/activity?page=%2Fdashboard`)도 전송합니다.
+5. **이메일 인증** — 메일함의 링크를 엽니다. 토큰은 서버 측에서 소비되고
+   `307 → /dashboard?verify=success`를 응답합니다. 인증 랜딩 후 대시보드 비컨이 다시
+   전송되는데, 이는 브라우저와 같은 방식입니다.
+6. **키 + 라이브 게이트** — `POST /api/keys` 전후로 활동 비컨
+   (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)을 전송합니다. 계정 로그인
+   (`email:password`)은 키가 생기자마자 `accounts.txt`에 저장되므로, 라이브 게이트가
+   실패해도 계정을 브라우저에서 수동으로 열 수 있습니다. 그런 다음 무료 티어를 한 번
+   읽고(`GET /api/me/free-tier`) 한 줄로 로그에 남기므로, 게이트가 실행되기 전에 민트된
+   계정의 속도 제한 상태를 확인할 수 있습니다. 이후 서로 다른 두 프롬프트가 모두 서로
+   다른 내용으로 200을 응답해야 키가 기록됩니다.
 
 ## ⚙️ CLI 옵션
 
@@ -192,14 +221,42 @@ node src/cli.js --help
 | `--count <n>` | 생성할 계정(및 키) 수, 기본값 1 |
 | `--pool <file>` | 프록시 목록, 한 줄에 출구 하나 (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); 인라인 `#` 주석 허용 |
 | `--headless` | 대체 브라우저를 헤드리스로 실행 (기본값: 캡차가 기대하는 오프스크린 창) |
-| `--screen` | 풀을 패널에 대해 테스트하고 출구별로 라이브/죽음 출력 |
+| `--verbose` | 로컬 프록시의 연결별 로그(`+conn` / `upstream ok` / `-conn`) 표시; 없으면 결과 줄만 표시 |
+| `--screen` | 풀을 패널에 대해 테스트하고 출구별로 라이브 / 챌린지(cloudflare) / 죽음 출력; 챌린지 출구에서도 민트가 가능하며, 민트는 그 출구의 Chrome에서 실행 |
 | `--verify` | `keys.txt` 라이브 검증; 죽은 키는 `keys-dead.txt`에 기록 |
+| `--quota` | `keys.txt`에 있는 모든 키의 무료 티어 사용량(`x-th-free-used-pct`)과 리셋 시간 표시 |
 | `--models` | 무료 모델 id 출력 |
 | `--strict-proxy` | 직접 요청을 절대 보내지 않음: 라이브 게이트도 풀을 통과해야 함 (환경 변수 `TOKENHARBOR_STRICT=1`도 동일) |
 
 죽어가는 출구가 계정을 잃게 하지는 않습니다: 가입과 라이브 게이트 모두 다른 풀 라인에서
 재시도하며, 속도 제한(`429`, 또는 본문에 `rate_limit_exceeded`가 담긴 `200`)은 패널이
-알려준 시간만큼 대기합니다.
+알려준 시간만큼 대기합니다. 게이트는 패널의 속도 제한 메시지를 대기 시간과 함께 로그에
+남기므로, 메시지가 명시하는 범위(IP별, 키별, 계정별)가 단순한 "속도 제한" 문구가 아니라
+로그에 표시됩니다.
+
+브라우저 사전 해결이 느리면, 튜닝 전에 출구 문제인지 코드 문제인지 확인하세요:
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+실제 풀 라인(CLI와 정확히 같은 방식으로 파싱)을 읽고, 해당 프록시를 통한 raw fetch를
+단계별로 측정한 뒤, 같은 출구를 통한 브라우저(호스트명, 확인된 IPv4,
+`--disable-http2`), 그리고 브라우저 직접 접속을 측정하고, 느린 부분을 지목하는 판정을
+출력합니다. 풀 라인의 자격 증명은 사용되지만 절대 출력되지 않습니다.
+
+민트가 라이브 게이트까지 도달했는데 채팅 호출이 시간 초과되면, 저장된 키를 직접
+테스트하세요 — 키 자체가 살아 있는지도 알 수 있습니다:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+민트와 동일한 브라우저 클라이언트를 열어 게이트의 정확한 프롬프트로
+`/v1/chat/completions`을 호출하고, 응답 본문을 스트리밍하면서 헤더 도착 시점, 각 청크
+도착 시점, 스트림이 끝나는지 여부를 로그에 남깁니다 — 느린 모델, 끊어져 오는 스트림,
+멈춘 엔드포인트가 다르게 보입니다. 키는 `keys-unverified.txt`(대체 `keys.txt`)에서
+읽으며 절대 출력되지 않습니다.
 
 ## 🛰️ 프록시 뒤에서
 
@@ -224,12 +281,13 @@ socks5://user:pass@10.0.0.5:1080
 | `keys-dead.txt` | 응답이 멈춘 키 (`--verify`에서) |
 | `keys-unverified.txt` | 라이브 게이트를 완료할 수 없었던 키 — 계정은 존재하고 키는 실제 |
 | `accounts.jsonl` | 계정당 한 줄: 이메일 + 단계별 결과 |
+| `accounts.txt` | 계정 로그인(`email:password`), 계정당 한 줄 — 수동 브라우저 로그인용 |
 | `mailtrap.txt` | Mailtrap API 토큰 (한 줄) |
 | `proxies.txt` | 선택적 프록시 목록 |
 | `src/cli.js` | 민트 / 검증 / 스크린 CLI |
 | `src/launcher.js` | 메뉴 (`npm start`) |
 | `src/solver.js` | Turnstile 위젯용 브라우저 부분 |
-| `src/consent-text.txt` | 패널이 검증하는 동의 텍스트 |
+| `src/consent-text.txt` | 대체 동의 텍스트(대시보드에서 라이브로 읽는 것을 먼저 시도) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | 라우터 커넥터 |
 
 ## 🔌 9Router에 연결

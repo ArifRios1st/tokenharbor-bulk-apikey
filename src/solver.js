@@ -7,47 +7,262 @@
  * the page's own state are what make it pass — nothing is pasted and no captcha
  * service is called.
  *
- * Chrome comes from `puppeteer-core` + the Chrome already installed on the machine
- * (`channel: 'chrome'`); `--enable-automation`, which puppeteer adds by default and
- * which Turnstile reads first, is suppressed on purpose.
+ * The browser comes from `puppeteer-core` + a Chromium on the machine, in this
+ * order: `channel: 'chrome'`, the env override (`PUPPETEER_EXECUTABLE_PATH` /
+ * `CHROME_PATH` / `BRAVE_PATH`), Chrome from the puppeteer cache (`npx puppeteer
+ * browsers install chrome`), then well-known Brave/Chrome install paths;
+ * `--enable-automation`, which puppeteer adds by default and which Turnstile reads
+ * first, is suppressed on purpose.
+ *
+ * It also runs the mint through the browser when Cloudflare's edge challenge
+ * page ("Just a moment...") blocks the CLI's HTTP stack: openBrowserClient()
+ * loads the login page in Chrome, waits for the challenge to clear, and returns
+ * a client whose requests run as same-origin fetch() inside the page. The
+ * clearance cookie alone is not enough — it is bound to the solving client's
+ * TLS fingerprint, so Node requests stay challenged even with it in the jar.
+ * presolveChallenge() (cookies only) is kept for callers that need just that.
+ *
+ * For SOCKS proxies with a username, the browser never talks SOCKS: Chrome's
+ * SOCKS5-auth handling hangs (no dialog, no CDP event, about:blank until the
+ * navigation timeout), so launchBrowser() starts a localhost forwarding proxy
+ * (src/local-proxy.js) and points Chrome at that instead.
  */
+const { startLocalProxy } = require('./local-proxy');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const BASE = 'https://tokenharbor.ai';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function launchBrowser({ px = null, headless = false } = {}) {
-  const puppeteer = require('puppeteer-core');
-  const args = ['--no-first-run', '--no-default-browser-check', '--window-size=1280,900', '--lang=en-US', '--mute-audio'];
-  if (px) {
-    const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
-    args.push(`--proxy-server=${scheme}://${px.host}:${px.port}`);
-  }
-  const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
-  return puppeteer
-    .launch({ ...options, channel: 'chrome' })
-    .catch(() => puppeteer.launch(options))
-    .catch((e) => {
-      throw new Error(
-        `Chrome not found (${e.message}). Install Chrome, or run: npx puppeteer browsers install chrome`
-      );
-    });
+/** True when a navigation error is only a timeout: the page may still be
+ * loading in the background, so the caller can keep watching instead of
+ * failing. A net::ERR_* is a real failure. */
+function isNavigationTimeout(e) {
+  // goto: "Navigation timeout of 30000 ms exceeded"; waits: "Waiting failed:
+  // 30000ms exceeded". A net::ERR_* matches neither.
+  return /timeout|exceeded/i.test(String((e && e.message) || e));
 }
 
-async function proxyAuth(page, px) {
-  if (!px || !px.username) return;
+/** Resource types the Cloudflare challenge never needs. Blocking them keeps a
+ * slow exit's bandwidth for the challenge scripts. */
+function shouldBlockResource(type) {
+  return ['image', 'stylesheet', 'font', 'media'].includes(type);
+}
+
+/** Chrome installed by `npx puppeteer browsers install chrome` lives in the
+ * puppeteer cache (~/.cache/puppeteer, or PUPPETEER_CACHE_DIR), which neither
+ * channel resolution nor the system install paths look at. Layout:
+ * chrome/<platform>-<buildId>/chrome-<platform>/<exe>. Newest install wins. */
+function findPuppeteerChrome() {
+  const cache = process.env['PUPPETEER_CACHE_DIR'] || path.join(os.homedir(), '.cache', 'puppeteer');
+  const chromeDir = path.join(cache, 'chrome');
+  let entries;
+  try {
+    entries = fs.readdirSync(chromeDir, { withFileTypes: true });
+  } catch (e) {
+    return null;
+  }
+  const plats =
+    process.platform === 'win32'
+      ? ['win64', 'win32']
+      : process.platform === 'darwin'
+        ? [process.arch === 'arm64' ? 'mac-arm64' : 'mac-x64', process.arch === 'arm64' ? 'mac-x64' : 'mac-arm64']
+        : ['linux-64'];
+  for (const plat of plats) {
+    const exeRel =
+      process.platform === 'win32'
+        ? path.join(`chrome-${plat}`, 'chrome.exe')
+        : process.platform === 'darwin'
+          ? path.join(`chrome-${plat}`, 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing')
+          : path.join(`chrome-${plat}`, 'chrome');
+    const dirs = entries
+      .filter((d) => d.isDirectory() && d.name.startsWith(`${plat}-`))
+      .map((d) => path.join(chromeDir, d.name))
+      .sort((a, b) => {
+        try {
+          return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+        } catch (e) {
+          return 0;
+        }
+      });
+    for (const dir of dirs) {
+      const exe = path.join(dir, exeRel);
+      try {
+        if (fs.existsSync(exe)) return exe;
+      } catch (e) {
+        /* next */
+      }
+    }
+  }
+  return null;
+}
+
+/** Find a Chromium executable: explicit env override first, then the puppeteer
+ * cache, then well-known install locations. Brave is Chromium, puppeteer-core
+ * drives it the same way. */
+function findBrowserExecutable() {
+  for (const v of ['PUPPETEER_EXECUTABLE_PATH', 'CHROME_PATH', 'BRAVE_PATH']) {
+    const p = process.env[v];
+    if (p && fs.existsSync(p)) return p;
+  }
+  const cached = findPuppeteerChrome();
+  if (cached) return cached;
+  const candidates = [];
+  if (process.platform === 'win32') {
+    const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+    const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const local = process.env['LOCALAPPDATA'] || '';
+    candidates.push(
+      `${pf}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${local}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${pf86}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${pf}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${pf86}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${local}\\Google\\Chrome\\Application\\chrome.exe`
+    );
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    );
+  } else {
+    candidates.push('/usr/bin/brave-browser', '/usr/bin/brave', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser');
+  }
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (e) {
+      /* next candidate */
+    }
+  }
+  return null;
+}
+
+/** The --proxy-server value for a pool entry. Credentials ride in the URL:
+ * Chrome authenticates a SOCKS5 proxy from them directly, no dialog and no
+ * CDP round trip. (proxyAuth() below stays as the fallback for proxies that
+ * challenge over HTTP 407.) */
+function proxyServerArg(px) {
+  if (!px) return null;
+  const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
+  const creds = px.username ? `${encodeURIComponent(px.username)}:${encodeURIComponent(px.password || '')}@` : '';
+  return `--proxy-server=${scheme}://${creds}${px.host}:${px.port}`;
+}
+
+async function launchBrowser({ px = null, headless = false, log = null, extraArgs = [], verbose = false } = {}) {
+  const puppeteer = require('puppeteer-core');
+  // The background flags matter on slow proxies: without them the browser phones
+  // home (component updates, variations, sync) through the proxy at startup and
+  // competes with the page itself for the exit.
+  const args = [
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-extensions',
+    '--disable-sync',
+    '--disable-default-apps',
+    '--window-size=1280,900',
+    '--lang=en-US',
+    '--mute-audio',
+    ...extraArgs,
+  ];
+  let localProxy = null;
+  if (usesLocalProxy(px)) {
+    // Chrome's SOCKS5-auth handling hangs (no dialog, no CDP event, the tab
+    // sits on about:blank until the navigation timeout). Node does the same
+    // handshake in under a second, so the browser gets a plain no-auth HTTP
+    // proxy on localhost and this module forwards upstream.
+    // The proxy's per-connection trail (+conn / upstream ok / -conn) is
+    // verbose-only: without --verbose the mint log stays readable and only
+    // the outcome lines show.
+    localProxy = await startLocalProxy(px, verbose ? log : null);
+    args.push(`--proxy-server=http://127.0.0.1:${localProxy.port}`);
+    if (verbose) log && log(`   local proxy on 127.0.0.1:${localProxy.port} -> ${px.host}:${px.port}`);
+  } else if (px) {
+    args.push(proxyServerArg(px));
+  }
+  const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
+  const attempts = [{ ...options, channel: 'chrome', label: "Chrome (channel 'chrome')" }];
+  const exe = findBrowserExecutable();
+  if (exe) attempts.push({ ...options, executablePath: exe, label: exe });
+  let lastErr = null;
+  for (const attempt of attempts) {
+    const { label, ...launchOpts } = attempt;
+    try {
+      const browser = await puppeteer.launch(launchOpts);
+      log && log(`   using browser: ${label}`);
+      if (localProxy) {
+        const origClose = browser.close.bind(browser);
+        browser.close = async (...a) => {
+          try {
+            await origClose(...a);
+          } finally {
+            await localProxy.close().catch(() => {});
+          }
+        };
+      }
+      return browser;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (localProxy) await localProxy.close().catch(() => {});
+  throw new Error(
+    `No browser found (${lastErr ? lastErr.message : 'none'}). Install Chrome or Brave, set BRAVE_PATH/CHROME_PATH to the browser executable, or run: npx puppeteer browsers install chrome`
+  );
+}
+
+/**
+ * True when the browser talks to the exit through the local forwarding proxy
+ * instead of SOCKS directly: a SOCKS entry with a username. Chrome then sees
+ * a plain no-auth proxy on localhost, so no proxy auth challenge can ever
+ * appear — proxyAuth() must stay out of the way, because enabling the CDP
+ * Fetch domain for auth stalls the page's requests in this setup (the TLS
+ * handshake completes, the HTTP request never leaves Chrome).
+ */
+function usesLocalProxy(px) {
+  return !!(px && px.protocol && px.protocol.startsWith('socks') && px.username);
+}
+
+/**
+ * Answer proxy auth challenges in the browser via the CDP Fetch domain.
+ * Chrome shows a native login dialog for proxy auth, which no script can
+ * answer; this session answers with the pool credentials instead. Auth-only:
+ * Fetch.enable is called WITHOUT patterns — a pattern pauses every matching
+ * request until Fetch.continueRequest, which nothing here calls. A no-op
+ * without a username, without a proxy, or when the browser goes through the
+ * local proxy (see usesLocalProxy).
+ */
+async function proxyAuth(page, px, log = null) {
+  if (!px || !px.username || usesLocalProxy(px)) return;
   const cdp = await page.target().createCDPSession();
   await cdp.send('Fetch.enable', { handleAuthRequests: true });
   cdp.on('Fetch.authRequired', async (e) => {
+    const url = (e.request && e.request.url) || '?';
+    const isProxy = e.authChallenge && e.authChallenge.isProxy;
+    log && log(`   proxy auth challenge (proxy=${!!isProxy}) for ${String(url).slice(0, 80)}`);
     await cdp
       .send('Fetch.continueWithAuth', {
         requestId: e.requestId,
         authChallengeResponse: { response: 'ProvideCredentials', username: px.username, password: px.password || '' },
       })
-      .catch(() => {});
+      .catch((err) => log && log(`   proxy auth continue failed: ${String(err.message).split('\n')[0].slice(0, 120)}`));
   });
 }
 
-/** Click inside the Turnstile iframe with a real mouse until the token appears. */
-async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
+/**
+ * Click inside the Turnstile iframe with a real mouse until the token appears.
+ * A widget that shows "Verification failed" never yields a token until it is
+ * reset, so the failure state is detected (via the challenge iframe's own
+ * text) and the widget is reset before the next attempt instead of burning
+ * the whole wait on a dead widget. When the automated tries are exhausted and
+ * the browser window is visible (manualWaitMs > 0), the user gets a chance to
+ * solve the challenge by hand — the run continues automatically once the
+ * token appears. Headless callers pass manualWaitMs: 0.
+ */
+async function solveTurnstile(page, log, { tries = 5, waitMs = 12000, manualWaitMs = 120000 } = {}) {
   const tokenOf = async () => {
     const v = await page
       .evaluate(() => {
@@ -57,9 +272,37 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
       .catch(() => '');
     return String(v || '');
   };
+  const widgetFailed = async () => {
+    const frames = page.frames().filter((f) => /challenges\.cloudflare\.com/.test(f.url()));
+    for (const f of frames) {
+      const text = await f
+        .evaluate(() => (document.body ? document.body.innerText : ''))
+        .catch(() => '');
+      if (/verification failed|expired/i.test(text)) return true;
+    }
+    return false;
+  };
+  const resetWidget = async () => {
+    return page
+      .evaluate(() => {
+        try {
+          if (window.turnstile && typeof window.turnstile.reset === 'function') {
+            window.turnstile.reset();
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      })
+      .catch(() => false);
+  };
   for (let attempt = 1; attempt <= tries; attempt++) {
     let token = await tokenOf();
     if (token && token.length > 20) return token;
+    if (await widgetFailed()) {
+      const reset = await resetWidget();
+      log && log(`   turnstile verification failed — ${reset ? 'reset via the Turnstile API' : 'clicking the widget to retry'} (attempt ${attempt})`);
+      await sleep(800);
+    }
     // The widget can be inline (no OOPIF) — click the container's checkbox spot.
     const hostBox = await page
       .evaluate(() => {
@@ -111,7 +354,24 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
     while (Date.now() - t0 < waitMs) {
       token = await tokenOf();
       if (token && token.length > 20) return token;
+      // A failed widget never recovers on its own — stop waiting and let the
+      // next attempt reset it instead of burning the rest of this wait.
+      if (await widgetFailed()) break;
       await sleep(700);
+    }
+  }
+  // Automated tries exhausted. The browser window is visible, so a human at
+  // the keyboard can still solve it — wait for the token instead of failing.
+  if (manualWaitMs > 0) {
+    log && log(`   turnstile needs a human — solve the challenge in the browser window (waiting up to ${Math.round(manualWaitMs / 1000)}s)`);
+    const t0 = Date.now();
+    while (Date.now() - t0 < manualWaitMs) {
+      await sleep(1000);
+      const token = await tokenOf();
+      if (token && token.length > 20) {
+        log && log('   turnstile solved by hand');
+        return token;
+      }
     }
   }
   return '';
@@ -121,15 +381,25 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
  * Fill the signup form in a real browser, press the button, and let the page mint
  * both the captcha token and the session. Returns the session cookies.
  */
-async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false }) {
-  const browser = await launchBrowser({ px, headless });
+async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false, jarCookies = [], verbose = false }) {
+  const browser = await launchBrowser({ px, headless, log, verbose });
   try {
     const page = await browser.newPage();
-    await proxyAuth(page, px);
+    await proxyAuth(page, px, verbose ? log : null);
+    // Reuse the CLI session's cookies (e.g. cf_clearance from a pre-solved
+    // challenge) so the browser does not face the challenge again.
+    if (jarCookies.length) {
+      await page.setCookie(...jarCookies.map((c) => ({ name: c.name, value: c.value, domain: 'tokenharbor.ai', path: '/' }))).catch(() => {});
+    }
     try {
-      await page.goto(`${BASE}/signup`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      await page.goto(`${BASE}/signup`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } catch (e) {
-      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 60)})` };
+      // A timeout is not a failure: the page keeps loading in the background
+      // and the selector wait below covers it. Only a net::ERR_* fails here.
+      if (!isNavigationTimeout(e)) {
+        return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+      }
+      log && log('   signup page still loading after 60s, watching for the form anyway');
     }
     await page
       .waitForSelector('input[name="email"]', { timeout: 60000 })
@@ -177,14 +447,23 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
         })
         .catch(() => {});
     };
+    // Success is leaving the signup page OR holding a session cookie: the form
+    // lives at /signup (no mode=signup in the URL), so testing for mode=signup
+    // was always true on the first check.
+    const done = async () => {
+      const gone = await page.evaluate(() => !/signup/.test(location.href)).catch(() => false);
+      if (gone) return true;
+      const cs = await page.cookies().catch(() => []);
+      return cs.some((c) => /^sb-auth-auth-token/.test(c.name));
+    };
     await press();
     let left = false;
     for (let i = 0; i < 20 && !left; i++) {
       await sleep(1500);
-      left = await page.evaluate(() => !/mode=signup/.test(location.href)).catch(() => false);
+      left = await done();
     }
     if (!left) {
-      const token = await solveTurnstile(page, log);
+      const token = await solveTurnstile(page, log, { manualWaitMs: headless ? 0 : 120000 });
       if (!token) {
         const diag = await page.evaluate(() => ({ widget: !!document.querySelector('.cf-turnstile, [data-sitekey]'), frames: [...document.querySelectorAll('iframe')].map((i) => i.src).filter((s) => /cloudflare/.test(s)).length })).catch(() => ({}));
         return { ok: false, why: `turnstile token never appeared (widget=${diag.widget} cfFrames=${diag.frames})` };
@@ -193,15 +472,216 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
       await press();
       for (let i = 0; i < 20 && !left; i++) {
         await sleep(1500);
-        left = await page.evaluate(() => !/mode=signup/.test(location.href)).catch(() => false);
+        left = await done();
       }
     }
     const cookies = await page.cookies();
+    const hasSession = cookies.some((c) => /^sb-auth-auth-token/.test(c.name));
     const text = await page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => '');
-    return { ok: left, why: left ? '' : String(text).replace(/\s+/g, ' ').slice(0, 120), cookies };
+    const ok = left && hasSession;
+    return { ok, why: ok ? '' : left ? 'left the signup page without a session cookie' : String(text).replace(/\s+/g, ' ').slice(0, 120), cookies };
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser };
+/**
+ * Runs inside the page (page.evaluate): a same-origin fetch with a timeout,
+ * returning { status, headers, text } — the same shape the CLI's req() does.
+ * Self-contained on purpose: puppeteer serializes this function into the
+ * page, so it must not close over anything. Exported so the VM tests can run
+ * it against a local server with Node's own fetch.
+ */
+async function browserFetchInPage({ url, method = 'GET', headers = {}, body = null, timeoutMs = 45000 }) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { method, headers, body, credentials: 'include', signal: ctrl.signal });
+    const text = await r.text();
+    const hdrs = {};
+    r.headers.forEach((v, k) => { hdrs[k] = v; });
+    return { status: r.status, headers: hdrs, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Builds the transport interface over a page that already cleared the edge
+ * challenge. It speaks the same shape as the CLI's req():
+ *   req(url, { method, headers, body, timeoutMs }) -> { status, headers, text }
+ *   session() -> whether a Supabase session cookie is in the browser store
+ *   setCookies(cookies) -> puts cookies (e.g. from the signup fallback)
+ *     into the browser store so later requests carry them
+ *   cookies() -> the page's cookies
+ *   evaluate(fn, arg) -> raw page.evaluate, for diagnostics (the chat-gate
+ *     probe streams a response body through it); the mint only uses req()
+ *   close() -> closes the browser
+ */
+function browserClientFromPage(page, browser) {
+  return {
+    kind: 'browser',
+    req(url, opts = {}) {
+      return page.evaluate(browserFetchInPage, {
+        url,
+        method: opts.method || 'GET',
+        headers: opts.headers || {},
+        body: opts.body ?? null,
+        timeoutMs: opts.timeoutMs || 45000,
+      });
+    },
+    async session() {
+      const cookies = await page.cookies().catch(() => []);
+      return cookies.some((c) => /^sb-auth-auth-token/.test(c.name));
+    },
+    async setCookies(cookies) {
+      for (const c of cookies || []) {
+        try {
+          await page.setCookie({ name: c.name, value: c.value, domain: c.domain || 'tokenharbor.ai', path: c.path || '/' });
+        } catch (e) {
+          /* a cookie the page cannot take is skipped */
+        }
+      }
+    },
+    cookies() {
+      return page.cookies();
+    },
+    evaluate(fn, arg) {
+      return page.evaluate(fn, arg);
+    },
+    async close() {
+      await browser.close().catch(() => {});
+    },
+  };
+}
+
+/**
+ * Opens a real Chrome on the login page, waits out Cloudflare's edge
+ * challenge, and returns a browser-backed HTTP client for the tokenharbor.ai
+ * origin. Requests run as same-origin fetch() inside the page, so they carry
+ * the browser's TLS fingerprint and cookies — the combination the edge
+ * accepts. The harvested cf_clearance is bound to the solving client's TLS
+ * fingerprint (proven 2026-11-19: a clean jar holding only a 359-char
+ * clearance still got "Just a moment" over Node HTTP on 8 exits), so Node
+ * requests stay challenged even with the cookie — only the browser's own
+ * stack passes. Close the client with client.close() when the mint is done.
+ * Throws when the browser cannot launch or the page never clears.
+ */
+async function openBrowserClient({ px = null, log = () => {}, headless = false, ua = null, verbose = false } = {}) {
+  const browser = await launchBrowser({ px, headless, log, verbose });
+  const t0 = Date.now();
+  try {
+    const page = await browser.newPage();
+    await proxyAuth(page, px, verbose ? log : null);
+    if (ua) await page.setUserAgent(ua);
+    // Block what the challenge never needs (images, fonts, stylesheets): on a
+    // slow exit they eat the bandwidth the challenge scripts need. Only when
+    // proxyAuth() did not claim the Fetch domain for auth — interception uses
+    // the same domain. proxyAuth claims it only for HTTP proxies with a
+    // username; for SOCKS the browser goes through the no-auth local proxy,
+    // so the domain stays free and blocking works there too. Switched off
+    // again once the page clears, so the API calls below run through plain
+    // fetch with nothing in the way.
+    if (!px || !px.username || usesLocalProxy(px)) {
+      const intercepted = await page
+        .setRequestInterception(true)
+        .then(() => true)
+        .catch(() => false);
+      if (intercepted) {
+        page.on('request', (req) => {
+          if (shouldBlockResource(req.resourceType())) req.abort().catch(() => {});
+          else req.continue().catch(() => {});
+        });
+      }
+    }
+    try {
+      // NOTE: 'commit' is not a valid waitUntil for puppeteer-core goto — it
+      // throws "Unknown value for options.waitUntil". domcontentloaded stays,
+      // but its timeout is short and non-fatal (see below).
+      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      log && log(`   browser + page load in ${Math.round((Date.now() - t0) / 1000)}s`);
+    } catch (e) {
+      // A timeout is not a failure: the page keeps loading in the background
+      // and the challenge wait below covers it. Only a net::ERR_* fails here.
+      if (!isNavigationTimeout(e)) {
+        throw new Error(`browser could not load the page (${String(e.message).slice(0, 200)})`);
+      }
+      log && log('   challenge page still loading after 30s, watching for the challenge anyway');
+    }
+    // The challenge usually clears itself in a few seconds; wait for the real
+    // page instead of sleeping a fixed time. If an interactive checkbox shows
+    // up, solve it like the signup widget and wait again.
+    let cleared = false;
+    for (let round = 0; round < 3 && !cleared; round++) {
+      cleared = await page
+        .waitForFunction(() => !!document.querySelector('input[name="email"]') || !/Just a moment/.test(document.title), { timeout: 30000 })
+        .then(() => true)
+        .catch(() => false);
+      if (cleared) break;
+      const token = await solveTurnstile(page, log, { tries: 2, waitMs: 8000, manualWaitMs: headless ? 0 : 120000 });
+      log && log(`   challenge checkbox ${token ? 'solved' : 'no token'}`);
+      if (!token) break;
+    }
+    if (!cleared) {
+      const diag = await page.evaluate(() => ({ title: document.title, widget: !!document.querySelector('.cf-turnstile, [data-sitekey]') })).catch(() => ({}));
+      throw new Error(`challenge did not clear (title="${String(diag.title || '').slice(0, 40)}" widget=${diag.widget})`);
+    }
+    // The cookie can land a moment after the page looks clear; poll for it.
+    // A missing cookie is not fatal here — the page cleared, and requests
+    // from this page carry the browser's fingerprint either way.
+    const { found } = await waitForClearance(page);
+    await page.setRequestInterception(false).catch(() => {});
+    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s${found ? '' : ' (no cf_clearance cookie — using the browser session as-is)'}`);
+    return browserClientFromPage(page, browser);
+  } catch (e) {
+    await browser.close().catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Pass Cloudflare's edge challenge page ("Just a moment...") in a real
+ * browser and return the clearance cookies. Kept for callers that only need
+ * the cookies — the mint itself now runs its requests through
+ * openBrowserClient, because the clearance is bound to the solving client's
+ * TLS fingerprint and Node requests stay challenged even with the cookie in
+ * the jar.
+ */
+async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null, verbose = false } = {}) {
+  let client;
+  try {
+    client = await openBrowserClient({ px, log, headless, ua, verbose });
+  } catch (e) {
+    return { ok: false, why: e.message };
+  }
+  try {
+    const cookies = await client.cookies();
+    const found = cookies.some((c) => c.name === 'cf_clearance');
+    const names = cookies.map((c) => c.name).join(', ') || '(none)';
+    if (!found) log && log(`   challenge cleared (no cf_clearance; browser cookies: ${names})`);
+    return { ok: true, cookies, clearance: found, cookieNames: cookies.map((c) => c.name) };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+/**
+ * Poll the page's cookies for cf_clearance until it appears or the timeout
+ * elapses. The challenge script can set the cookie a moment after the page
+ * itself looks clear, so a single snapshot right after the wait misses it.
+ * Returns { found, cookies } — cookies is the last snapshot. Callers log
+ * names only; values never leave the jar.
+ */
+async function waitForClearance(page, { timeoutMs = 10000, pollMs = 500 } = {}) {
+  const t0 = Date.now();
+  let cookies = [];
+  while (Date.now() - t0 < timeoutMs) {
+    cookies = await page.cookies().catch(() => []);
+    if (cookies.some((c) => c.name === 'cf_clearance')) return { found: true, cookies };
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  cookies = await page.cookies().catch(() => cookies);
+  return { found: cookies.some((c) => c.name === 'cf_clearance'), cookies };
+}
+
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, openBrowserClient, browserClientFromPage, browserFetchInPage, waitForClearance, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };

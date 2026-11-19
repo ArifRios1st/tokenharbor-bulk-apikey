@@ -26,7 +26,7 @@
 
 <div align="center">
 
-**English** · [Türkçe](README.tr.md) · [中文](README.cn.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
+[English](README.md) · [Türkçe](README.tr.md) · [中文](README.cn.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · **Français** · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
 
 </div>
 
@@ -45,7 +45,7 @@ Deux barrières se dressent après l'inscription et toutes deux sont faciles à 
 route `:free` répond `403 free_models_disabled` tant que le consentement aux modèles gratuits n'est pas activé —
 et ce point de terminaison de consentement **valide le texte affiché par le client** (`shown_text`), donc un simple
 `{"free_models_enabled":true}` répond `400 reload_and_retry`. Cette CLI fait tout cela,
-lit les identifiants d'action Next.js depuis la page en direct à chaque exécution, et n'écrit que les clés qui passent
+lit les identifiants d'action Next.js et le texte de consentement depuis la page en direct à chaque exécution, et n'écrit que les clés qui passent
 un chat-200 en direct.
 
 ## 🎁 Offre gratuite — ce que vous obtenez
@@ -148,9 +148,16 @@ Mesuré de bout en bout (`node src/cli.js --auto --count 1 --pool proxies.txt`) 
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -165,17 +172,37 @@ limite de débit) atterrit dans `keys-unverified.txt` afin que le compte ne soit
    sont les services de repli.
 2. **Inscription** — les identifiants d'action serveur Next.js (`next-action`, `$ACTION_KEY`,
    `x-deployment-id`) sont lus depuis la page en direct à chaque exécution, donc un redéploiement du panneau ne casse pas
-   la CLI ; l'empreinte de l'appareil et le fuseau horaire accompagnent la requête, et le fuseau horaire est
-   mesuré depuis la sortie, pas depuis votre machine.
-3. **Vérification humaine** — lorsque le panneau rend le widget, l'inscription est rejouée dans un vrai Chrome
-   (`src/solver.js`, `puppeteer-core` + le Chrome déjà installé ; `--enable-automation` est
+   la CLI ; l'empreinte de l'appareil, le fuseau horaire et la confirmation de l'âge accompagnent la requête, et le fuseau horaire est
+   mesuré depuis la sortie, pas depuis votre machine. Si Cloudflare répond à la page de connexion par son défi de périphérie
+   (`Just a moment...`, fréquent sur les sorties VPN/centre de données), le reste de la génération se déroule dans un vrai Chrome
+   sur la même sortie : chaque requête (découverte, inscription, consentement, vérification, clés, test en direct) passe par le
+   fetch du navigateur lui-même, car le cookie de déblocage seul ne suffit pas — `cf_clearance` est lié à l'empreinte TLS
+   du navigateur qui a résolu le défi, et les requêtes Node restent défiées même avec un cookie valide dans le jar.
+   Pour les sorties SOCKS avec un nom d'utilisateur, Chrome passe par un proxy de redirection local
+   (`src/local-proxy.js`) au lieu de parler SOCKS lui-même, car la gestion de l'authentification
+   SOCKS5 par Chrome se bloque.
+3. **Vérification humaine** — lorsque le panneau rend le widget, l'inscription est rejouée dans un vrai navigateur
+   (`src/solver.js`, `puppeteer-core` + le Chrome ou Brave déjà installé, ou le chemin dans
+   `BRAVE_PATH` / `CHROME_PATH` ; `--enable-automation` est
    supprimé volontairement), la case est cochée à la souris, et les cookies de session de ce navigateur sont
    renvoyés à la CLI.
-4. **Vérification e-mail** — le lien de la boîte aux lettres est ouvert ; le jeton est consommé
-   côté serveur et répond `307 → /dashboard?verify=success`.
-5. **Consentement aux modèles gratuits** — `POST /api/me/privacy` avec le texte de consentement affiché par le tableau de bord
-   (`src/consent-text.txt`), `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **Clé + test en direct** — `POST /api/keys`, puis deux invites différentes doivent toutes deux répondre 200 avec
+   Un widget qui signale « Verification failed » est réinitialisé (via l'API Turnstile quand elle est disponible, sinon en cliquant dessus) puis réessayé ; si les tentatives automatiques échouent encore, l'exécution attend jusqu'à 2 minutes qu'un humain résolve le défi dans la fenêtre du navigateur au lieu d'abandonner le compte (les exécutions avec `--headless` sautent cette attente).
+4. **Consentement aux modèles gratuits** — `POST /api/me/privacy` avec le texte de consentement lu en direct depuis le
+   tableau de bord : les phrases de consentement dans le chunk JS du tableau de bord plus la liste des modèles depuis
+   `GET /api/me/free-tier`, assemblés exactement comme le `innerText` de la modale du navigateur
+   (`src/consent-text.txt` n'est que le repli quand la lecture en direct échoue).
+   `screen: "consent_modal"`, `path: "/dashboard"`. Cela s'exécute avant la vérification
+   e-mail, comme le fait le navigateur. Juste après l'inscription, la CLI envoie aussi la
+   balise de vue de page du tableau de bord (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **Vérification e-mail** — le lien de la boîte aux lettres est ouvert ; le jeton est consommé
+   côté serveur et répond `307 → /dashboard?verify=success`. La balise du tableau de bord se déclenche
+   à nouveau après l'atterrissage de la vérification, comme le fait le navigateur.
+6. **Clé + test en direct** — balises d'activité (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
+   avant et après `POST /api/keys`. L'identifiant du compte (`email:password`) est enregistré dans
+   `accounts.txt` dès que la clé existe, afin que le compte puisse être ouvert manuellement dans un
+   navigateur même si le test en direct échoue. L'offre gratuite est ensuite lue une fois
+   (`GET /api/me/free-tier`) et journalisée en une ligne, afin que l'état de limite de débit d'un compte généré
+   soit visible avant que le test ne s'exécute. Ensuite, deux invites différentes doivent toutes deux répondre 200 avec
    un contenu différent avant que la clé ne soit écrite.
 
 ## ⚙️ Options de la CLI
@@ -194,13 +221,40 @@ node src/cli.js --help
 | `--count <n>` | comptes (et clés) à créer, 1 par défaut |
 | `--pool <file>` | liste de proxys, une sortie par ligne (`http://host:port`, `socks5://user:pass@host:port`, `host:port`) ; les commentaires `#` en ligne sont acceptés |
 | `--headless` | exécute le navigateur de repli en mode headless (par défaut : fenêtre hors écran, ce qu'attend le captcha) |
-| `--screen` | teste le pool contre le panneau et affiche vivant/mort par sortie |
+| `--verbose` | affiche le journal par connexion du proxy local (`+conn` / `upstream ok` / `-conn`) ; sans lui, seules les lignes de résultat s'affichent |
+| `--screen` | teste le pool contre le panneau et affiche en direct / défié (cloudflare) / mort par sortie ; les sorties défiées peuvent toujours générer, la génération se déroule dans Chrome sur celles-ci |
 | `--verify` | vérifie en direct `keys.txt` ; les clés mortes sont écrites dans `keys-dead.txt` |
+| `--quota` | affiche l'utilisation du niveau gratuit (`x-th-free-used-pct`) et l'heure de réinitialisation de chaque clé dans `keys.txt` |
 | `--models` | affiche les identifiants des modèles gratuits |
 | `--strict-proxy` | n'envoie jamais de requête directe : le test en direct doit aussi passer par le pool (la variable d'env `TOKENHARBOR_STRICT=1` fait de même) |
 
 Une sortie défaillante ne coûte jamais un compte : l'inscription et le test en direct réessaient tous deux sur d'autres lignes du pool,
 et une limite de débit (un `429`, ou un `200` dont le corps contient `rate_limit_exceeded`) attend le temps indiqué par le panneau.
+Le test journalise le message de limite de débit du panneau avec l'attente, afin que la portée qu'il nomme (par IP, par clé,
+par compte) apparaisse dans le journal au lieu d'un simple « rate limited ».
+
+Si la pré-résolution dans le navigateur est lente, déterminez s'il s'agit de la sortie ou du code avant de régler quoi que ce soit :
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+Il lit une vraie ligne du pool (analysée exactement comme le fait la CLI), chronomètre le fetch brut via
+ce proxy étape par étape, puis le navigateur via la même sortie (nom d'hôte, IPv4 résolue, et `--disable-http2`), puis le navigateur en direct, et affiche un verdict nommant la
+partie lente. Les identifiants dans la ligne du pool sont utilisés et jamais affichés.
+
+Si la génération atteint le test en direct mais que l'appel de chat expire, testez une clé enregistrée
+directement — cela vous dit aussi si la clé elle-même est active :
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+Il ouvre le même client navigateur que celui utilisé par la génération, appelle `/v1/chat/completions`
+avec l'invite exacte du test, et diffuse le corps de la réponse, en journalisant l'arrivée des
+en-têtes, l'arrivée de chaque morceau, et si le flux se termine un jour —
+afin qu'un modèle lent, un flux qui s'écoule au goutte-à-goutte et un point de terminaison bloqué aient l'air différents.
+La clé est lue depuis `keys-unverified.txt` (repli `keys.txt`) et n'est jamais affichée.
 
 ## 🛰️ Derrière un proxy
 
@@ -225,12 +279,13 @@ fournisseur de messagerie n'est pas le panneau), donc une sortie lente ne peut p
 | `keys-dead.txt` | clés qui ont cessé de répondre (depuis `--verify`) |
 | `keys-unverified.txt` | clés dont le test en direct n'a pas pu aboutir — le compte existe, la clé est réelle |
 | `accounts.jsonl` | une ligne par compte : e-mail + résultats des étapes |
+| `accounts.txt` | identifiants des comptes (`email:password`), un par compte — pour une connexion manuelle dans le navigateur |
 | `mailtrap.txt` | votre jeton API Mailtrap (une ligne) |
 | `proxies.txt` | liste de proxys facultative |
 | `src/cli.js` | la CLI de génération / vérification / test |
 | `src/launcher.js` | le menu (`npm start`) |
 | `src/solver.js` | la partie navigateur pour le widget Turnstile |
-| `src/consent-text.txt` | le texte de consentement validé par le panneau |
+| `src/consent-text.txt` | texte de consentement de repli (la lecture en direct depuis le tableau de bord est essayée d'abord) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | connecteurs de routeur |
 
 ## 🔌 Connexion à 9Router

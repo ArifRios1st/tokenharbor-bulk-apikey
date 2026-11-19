@@ -26,7 +26,7 @@
 
 <div align="center">
 
-**English** · [Türkçe](README.tr.md) · [中文](README.cn.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
+[English](README.md) · **Türkçe** · [中文](README.cn.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
 
 </div>
 
@@ -36,7 +36,7 @@
 
 Token Harbor, ücretsiz katmanı **yüzde tabanlı** olan bir Next.js panelidir (Supabase kimlik doğrulaması): kişisel bir **7 günlük pencere** ilk ücretsiz isteğinizle başlar ve sabit bir istek sayısı yerine liste fiyatının bir payını tüketir. Kayıt, e-posta + parola ve bir **Cloudflare Turnstile bileşeni** ile ağ başına bir sınırla yapılır — bir ağ bir hesap demektir — yani toplu bir çalıştırma aslında "hesap başına bir taze çıkış" demektir.
 
-Kayıttan sonra iki kapı vardır ve ikisi de kolayca gözden kaçar: kayıt e-postasındaki bağlantı açılana kadar API `403 email_verification_required` yanıtı verir ve ücretsiz modeller onayı etkinleştirilene kadar her `:free` rotası `403 free_models_disabled` yanıtı verir — ve bu onay uç noktası **istemcinin gösterdiği metni doğrular** (`shown_text`), bu yüzden çıplak bir `{"free_models_enabled":true}` yanıtı `400 reload_and_retry` verir. Bu CLI hepsini yapar, Next.js action kimliklerini her çalıştırmada canlı sayfadan okur ve yalnızca canlı bir chat-200'ü geçen anahtarları yazar.
+Kayıttan sonra iki kapı vardır ve ikisi de kolayca gözden kaçar: kayıt e-postasındaki bağlantı açılana kadar API `403 email_verification_required` yanıtı verir ve ücretsiz modeller onayı etkinleştirilene kadar her `:free` rotası `403 free_models_disabled` yanıtı verir — ve bu onay uç noktası **istemcinin gösterdiği metni doğrular** (`shown_text`), bu yüzden çıplak bir `{"free_models_enabled":true}` yanıtı `400 reload_and_retry` verir. Bu CLI hepsini yapar, Next.js action kimliklerini ve onay metnini her çalıştırmada canlı sayfadan okur ve yalnızca canlı bir chat-200'ü geçen anahtarları yazar.
 
 ## 🎁 Ücretsiz katman — ne kadar alırsınız
 
@@ -125,9 +125,16 @@ Uçtan uca ölçüm (`node src/cli.js --auto --count 1 --pool proxies.txt`):
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -138,12 +145,13 @@ done
 
 1. **Posta kutusu** — Mailtrap hesabınızda hesap başına taze bir gelen kutusu (`mailtrap.txt`); genel mail.tm / mail.gw yedek raylardır.
 2. **Kayıt** — Next.js server-action kimlikleri (`next-action`, `$ACTION_KEY`,
-   `x-deployment-id`) her çalıştırmada canlı sayfadan okunur, böylece bir panel yeniden dağıtımı CLI'yi bozmaz; cihaz parmak izi ve saat dilimi istekle birlikte gider ve saat dilimi makinenizden değil çıkıştan ölçülür.
-3. **İnsan doğrulaması** — panel bileşeni oluşturduğunda, kayıt gerçek bir Chrome'da yeniden oynatılır
-   (`src/solver.js`, `puppeteer-core` + zaten kurulu Chrome; `--enable-automation` kasıtlı olarak bastırılır), onay kutusuna fareyle tıklanır ve o tarayıcının oturum çerezleri CLI'ye geri verilir.
-4. **E-posta doğrulaması** — posta kutusundaki bağlantı açılır; token sunucu tarafında tüketilir ve `307 → /dashboard?verify=success` yanıtı verir.
-5. **Ücretsiz modeller onayı** — panonun gösterdiği onay metniyle (`src/consent-text.txt`) `POST /api/me/privacy`, `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **Anahtar + canlı kapı** — `POST /api/keys`, ardından anahtar yazılmadan önce iki farklı istemin ikisi de farklı içerikle 200 yanıtı vermelidir.
+   `x-deployment-id`) her çalıştırmada canlı sayfadan okunur, böylece bir panel yeniden dağıtımı CLI'yi bozmaz; cihaz parmak izi, saat dilimi ve yaş onayı istekle birlikte gider ve saat dilimi makinenizden değil çıkıştan ölçülür. Cloudflare giriş sayfasına kenar doğrulama sorusuyla (`Just a moment...`, VPN/veri merkezi çıkışlarında yaygındır) yanıt verirse, oluşturmanın geri kalanı aynı çıkışta gerçek bir Chrome içinde çalışır: her istek (discover, signup, consent, verify, keys, canlı kapı) tarayıcının kendi fetch'inden geçer, çünkü izin çerezi tek başına yeterli değildir — `cf_clearance` çözen tarayıcının TLS parmak izine bağlıdır ve Node istekleri çerez kavanozunda geçerli bir çerez olsa bile soruyla karşılaşmaya devam eder. Kullanıcı adlı SOCKS çıkışları için Chrome, SOCKS'u kendisi konuşmak yerine bir localhost yönlendirme proxy'si (`src/local-proxy.js`) üzerinden gider, çünkü Chrome'un SOCKS5-auth işleyişi takılır.
+3. **İnsan doğrulaması** — panel bileşeni oluşturduğunda, kayıt gerçek bir tarayıcıda yeniden oynatılır
+   (`src/solver.js`, `puppeteer-core` + zaten kurulu Chrome veya Brave ya da `BRAVE_PATH` / `CHROME_PATH` içindeki yol; `--enable-automation` kasıtlı olarak bastırılır), onay kutusuna fareyle tıklanır ve o tarayıcının oturum çerezleri CLI'ye geri verilir.
+   "Verification failed" bildiren bir bileşen sıfırlanır (mümkünse Turnstile API'si ile, değilse üzerine tıklanarak) ve yeniden denenir; otomatik denemeler yine başarısız olursa, çalıştırma hesabı başarısız saymak yerine 2 dakikaya kadar bir insanın tarayıcı penceresinde doğrulamayı çözmesini bekler (`--headless` çalıştırmalar bu beklemeyi atlar).
+4. **Ücretsiz modeller onayı** — onay metni panodan canlı okunarak `POST /api/me/privacy`: pano JS parçasındaki onay cümleleri artı `GET /api/me/free-tier` adresinden model listesi, tam olarak tarayıcı modalının `innerText` değeri gibi birleştirilir (`src/consent-text.txt` yalnızca canlı okuma başarısız olursa yedektir). `screen: "consent_modal"`, `path: "/dashboard"`. Bu, tarayıcının yaptığı gibi e-posta doğrulamasından önce çalışır. Kaydın hemen ardından CLI ayrıca panonun sayfa görüntüleme işaretini gönderir (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **E-posta doğrulaması** — posta kutusundaki bağlantı açılır; token sunucu tarafında tüketilir ve `307 → /dashboard?verify=success` yanıtı verir. Pano işareti doğrulama inişinden sonra tekrar ateşlenir, tıpkı tarayıcının yaptığı gibi.
+6. **Anahtar + canlı kapı** — `POST /api/keys` öncesinde ve sonrasında etkinlik işaretleri (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`). Hesap girişi (`email:password`) anahtar var olur olmaz `accounts.txt` dosyasına kaydedilir, böylece canlı kapı başarısız olsa bile hesap tarayıcıda elle açılabilir. Ardından ücretsiz katman bir kez okunur (`GET /api/me/free-tier`) ve tek satırda kaydedilir, böylece oluşturulan hesabın hız sınırı durumu kapı çalışmadan önce görünür. Ardından anahtar yazılmadan önce iki farklı istemin ikisi de farklı içerikle 200 yanıtı vermelidir.
 
 ## ⚙️ CLI seçenekleri
 
@@ -161,12 +169,30 @@ node src/cli.js --help
 | `--count <n>` | oluşturulacak hesap (ve anahtar) sayısı, varsayılan 1 |
 | `--pool <file>` | proxy listesi, satır başına bir çıkış (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); satır içi `#` yorumları sorun değil |
 | `--headless` | yedek tarayıcıyı başsız çalıştır (varsayılan: captcha'nın beklediği ekran dışı pencere) |
-| `--screen` | havuzu panele karşı test et ve her çıkış için canlı/ölü yazdır |
+| `--verbose` | yerel proxy'nin bağlantı başına günlüğünü göster (`+conn` / `upstream ok` / `-conn`); olmadan yalnızca sonuç satırları görünür |
+| `--screen` | havuzu panele karşı test et ve her çıkış için canlı / doğrulama sorulu (cloudflare) / ölü yazdır; doğrulama sorulu çıkışlar yine de oluşturabilir, oluşturma onlarda Chrome içinde çalışır |
 | `--verify` | `keys.txt` dosyasını canlı doğrula; ölü anahtarlar `keys-dead.txt` dosyasına yazılır |
+| `--quota` | `keys.txt` içindeki her anahtarın ücretsiz katman kullanımını (`x-th-free-used-pct`) ve sıfırlanma zamanını göster |
 | `--models` | ücretsiz model kimliklerini yazdır |
 | `--strict-proxy` | asla doğrudan istek gönderme: canlı kapı da havuzdan geçmelidir (`TOKENHARBOR_STRICT=1` ortam değişkeni aynısını yapar) |
 
-Ölen bir çıkış bir hesaba asla mal olmaz: kayıt ve canlı kapı ikisi de diğer havuz satırlarında yeniden dener ve bir hız sınırı (`429` veya gövdesinde `rate_limit_exceeded` taşıyan bir `200`) panelin belirttiği süre kadar bekler.
+Ölen bir çıkış bir hesaba asla mal olmaz: kayıt ve canlı kapı ikisi de diğer havuz satırlarında yeniden dener ve bir hız sınırı (`429` veya gövdesinde `rate_limit_exceeded` taşıyan bir `200`) panelin belirttiği süre kadar bekler. Kapı, panelin hız sınırı mesajını bekleme süresiyle birlikte kaydeder, böylece belirttiği kapsam (IP başına, anahtar başına, hesap başına) çıplak bir "hız sınırlı" yerine günlükte görünür.
+
+Tarayıcı ön çözümü yavaşsa, herhangi bir ayar yapmadan önce bunun çıkıştan mı koddan mı kaynaklandığını öğrenin:
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+Gerçek bir havuz satırını okur (tam CLI'nin yaptığı gibi ayrıştırılır), o proxy üzerinden ham fetch'i aşama aşama zamanlar, ardından aynı çıkış üzerinden tarayıcıyı (ana makine adı, çözülen IPv4 ve `--disable-http2`), sonra doğrudan tarayıcıyı zamanlar ve yavaş kısmı adlandıran bir karar yazdırır. Havuz satırındaki kimlik bilgileri kullanılır ve asla yazdırılmaz.
+
+Oluşturma canlı kapıya ulaşıp sohbet çağrısı zaman aşımına uğrarsa, kaydedilmiş bir anahtarı doğrudan test edin — anahtarın kendisinin canlı olup olmadığını da söyler:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+Oluşturmanın kullandığı aynı tarayıcı istemcisini açar, kapının tam istemiyle `/v1/chat/completions` adresini çağırır ve yanıt gövdesini akıtarak başlıkların ne zaman geldiğini, her parçanın ne zaman geldiğini ve akışın hiç bitip bitmediğini kaydeder — böylece yavaş bir model, damlayan bir akış ve takılı bir uç nokta farklı görünür. Anahtar `keys-unverified.txt` dosyasından okunur (yedek `keys.txt`) ve asla yazdırılmaz.
 
 ## 🛰️ Proxy arkasında
 
@@ -188,12 +214,13 @@ socks5://user:pass@10.0.0.5:1080
 | `keys-dead.txt` | yanıt vermeyi bırakan anahtarlar (`--verify` sonucu) |
 | `keys-unverified.txt` | canlı kapısı tamamlanamayan anahtarlar — hesap var, anahtar gerçek |
 | `accounts.jsonl` | hesap başına bir satır: e-posta + adım sonuçları |
+| `accounts.txt` | hesap girişleri (`email:password`), hesap başına bir tane — elle tarayıcı girişi için |
 | `mailtrap.txt` | Mailtrap API token'ınız (tek satır) |
 | `proxies.txt` | isteğe bağlı proxy listesi |
 | `src/cli.js` | oluşturma / doğrulama / tarama CLI'si |
 | `src/launcher.js` | menü (`npm start`) |
 | `src/solver.js` | Turnstile bileşeni için tarayıcı tarafı |
-| `src/consent-text.txt` | panelin doğruladığı onay metni |
+| `src/consent-text.txt` | yedek onay metni (önce panodan canlı okuma denenir) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | yönlendirici bağlayıcıları |
 
 ## 🔌 9Router'a bağlan
