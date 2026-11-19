@@ -174,6 +174,9 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    measured from the exit, not from your machine. If Cloudflare answers the login page with its
    edge challenge (`Just a moment...`, common on VPN/datacenter exits), a real Chrome
    pre-solves it first and the clearance cookie is carried into the HTTP session.
+   For SOCKS exits with a username, Chrome goes through a localhost forwarding
+   proxy (`src/local-proxy.js`) instead of talking SOCKS itself, because Chrome's
+   SOCKS5-auth handling hangs.
 3. **Human check** — when the panel renders the widget, the sign-up is replayed in a real browser
    (`src/solver.js`, `puppeteer-core` + the Chrome or Brave already installed, or the path in
    `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` is suppressed on purpose), the checkbox

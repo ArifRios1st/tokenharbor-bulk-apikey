@@ -67,7 +67,12 @@ function onceWithTimeout(emitter, event, ms, what) {
   });
 }
 
-/** Open a TCP connection to host:port through an upstream SOCKS5 proxy. */
+/**
+ * Open a TCP connection to host:port through an upstream SOCKS5 proxy. The
+ * whole handshake is bounded by timeoutMs: a proxy that accepts the TCP
+ * connection and then goes silent (or drops the socket without a reply)
+ * must fail fast with a 502, never hang the browser request forever.
+ */
 async function socks5Connect({ proxyHost, proxyPort, username = null, password = null, host, port, timeoutMs = 20000 }) {
   const sock = net.connect(proxyPort, proxyHost);
   const fail = (e) => {
@@ -78,34 +83,46 @@ async function socks5Connect({ proxyHost, proxyPort, username = null, password =
     }
     throw e;
   };
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`socks5 connect to ${host}:${port} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
   try {
-    await onceWithTimeout(sock, 'connect', timeoutMs, 'TCP connect to proxy');
-    const reader = new Reader(sock);
-    const methods = username ? [0x00, 0x02] : [0x00];
-    sock.write(Buffer.from([0x05, methods.length, ...methods]));
-    const hs = await reader.read(2);
-    if (hs[0] !== 0x05 || hs[1] === 0xff) {
-      throw new Error(`socks5 handshake rejected (method ${hs[1]})`);
-    }
-    if (hs[1] === 0x02) {
-      const u = Buffer.from(username || '');
-      const p = Buffer.from(password || '');
-      sock.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
-      const ar = await reader.read(2);
-      if (ar[0] !== 0x01 || ar[1] !== 0x00) throw new Error('socks5 auth rejected');
-    }
-    const hostBuf = Buffer.from(host);
-    sock.write(
-      Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]), hostBuf, Buffer.from([port >> 8, port & 0xff])])
-    );
-    const rep = await reader.read(4);
-    if (rep[0] !== 0x05 || rep[1] !== 0x00) throw new Error(`socks5 connect rc=${rep[1]}`);
-    const atyp = rep[3];
-    const restLen = atyp === 0x01 ? 6 : atyp === 0x04 ? 18 : atyp === 0x03 ? (await reader.read(1))[0] + 2 : 0;
-    if (restLen) await reader.read(restLen);
-    reader.detach();
-    return sock;
+    const connected = await Promise.race([
+      (async () => {
+        await onceWithTimeout(sock, 'connect', timeoutMs, 'TCP connect to proxy');
+        const reader = new Reader(sock);
+        const methods = username ? [0x00, 0x02] : [0x00];
+        sock.write(Buffer.from([0x05, methods.length, ...methods]));
+        const hs = await reader.read(2);
+        if (hs[0] !== 0x05 || hs[1] === 0xff) {
+          throw new Error(`socks5 handshake rejected (method ${hs[1]})`);
+        }
+        if (hs[1] === 0x02) {
+          const u = Buffer.from(username || '');
+          const p = Buffer.from(password || '');
+          sock.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+          const ar = await reader.read(2);
+          if (ar[0] !== 0x01 || ar[1] !== 0x00) throw new Error('socks5 auth rejected');
+        }
+        const hostBuf = Buffer.from(host);
+        sock.write(
+          Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]), hostBuf, Buffer.from([port >> 8, port & 0xff])])
+        );
+        const rep = await reader.read(4);
+        if (rep[0] !== 0x05 || rep[1] !== 0x00) throw new Error(`socks5 connect rc=${rep[1]}`);
+        const atyp = rep[3];
+        const restLen = atyp === 0x01 ? 6 : atyp === 0x04 ? 18 : atyp === 0x03 ? (await reader.read(1))[0] + 2 : 0;
+        if (restLen) await reader.read(restLen);
+        reader.detach();
+        return sock;
+      })(),
+      timeout,
+    ]);
+    clearTimeout(timer);
+    return connected;
   } catch (e) {
+    clearTimeout(timer);
     return fail(e);
   }
 }
@@ -139,7 +156,23 @@ function readHead(sock, timeoutMs = 10000) {
   });
 }
 
-function pipePair(a, b, sockets) {
+function pipePair(a, b, sockets, log, label) {
+  let upBytes = 0;
+  let downBytes = 0;
+  let logged = false;
+  const done = () => {
+    if (logged) return;
+    logged = true;
+    log && log(`proxy: -conn ${label} (${upBytes} up / ${downBytes} down)`);
+  };
+  // Counting listeners do not disturb piping: every 'data' listener gets
+  // every chunk.
+  a.on('data', (c) => {
+    upBytes += c.length;
+  });
+  b.on('data', (c) => {
+    downBytes += c.length;
+  });
   const kill = () => {
     try {
       a.destroy();
@@ -156,6 +189,7 @@ function pipePair(a, b, sockets) {
   b.on('error', kill);
   a.on('close', () => {
     sockets.delete(a);
+    done();
     try {
       b.end();
     } catch (e) {
@@ -164,6 +198,7 @@ function pipePair(a, b, sockets) {
   });
   b.on('close', () => {
     sockets.delete(b);
+    done();
     try {
       a.end();
     } catch (e) {
@@ -174,11 +209,13 @@ function pipePair(a, b, sockets) {
   b.pipe(a);
 }
 
-async function handleClient(client, px, sockets) {
+async function handleClient(client, px, sockets, log) {
+  const t0 = Date.now();
   let head;
   try {
     head = await readHead(client);
   } catch (e) {
+    log && log(`proxy: head failed: ${String(e.message).split('\n')[0].slice(0, 80)}`);
     try {
       client.destroy();
     } catch (err) {
@@ -193,12 +230,14 @@ async function handleClient(client, px, sockets) {
   const text = head.toString('latin1');
   const [requestLine, ...headerLines] = text.split('\r\n');
   const [method, target] = (requestLine || '').split(' ');
+  log && log(`proxy: ${method} ${String(target).slice(0, 100)}`);
   let host;
   let port;
   let rewrite = null;
   if (method === 'CONNECT') {
     const m = (target || '').match(/^([^:]+):(\d+)$/);
     if (!m) {
+      log && log('proxy: 400 bad CONNECT target');
       client.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       client.destroy();
       return;
@@ -209,6 +248,7 @@ async function handleClient(client, px, sockets) {
     // Plain http:// request: forward it in origin form through the tunnel.
     const m = (target || '').match(/^http:\/\/([^/:]+)(?::(\d+))?(\/.*)?$/);
     if (!m) {
+      log && log('proxy: 400 bad request target');
       client.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       client.destroy();
       return;
@@ -220,7 +260,9 @@ async function handleClient(client, px, sockets) {
   let upstream;
   try {
     upstream = await socks5Connect({ proxyHost: px.host, proxyPort: px.port, username: px.username, password: px.password, host, port });
+    log && log(`proxy: upstream ok ${host}:${port} in ${Date.now() - t0}ms`);
   } catch (e) {
+    log && log(`proxy: upstream FAILED ${host}:${port}: ${String(e.message).split('\n')[0].slice(0, 100)}`);
     client.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
     client.destroy();
     return;
@@ -232,23 +274,28 @@ async function handleClient(client, px, sockets) {
     upstream.write(rewrite);
   }
   if (leftover) upstream.write(leftover);
-  pipePair(client, upstream, sockets);
+  pipePair(client, upstream, sockets, log, `${host}:${port}`);
 }
 
 /**
  * Start the forwarding proxy for one upstream pool entry. Resolves with
- * { port, close() }; the port is an ephemeral loopback port.
+ * { port, close() }; the port is an ephemeral loopback port. onLog, when
+ * given, gets one line per connection, request, upstream result and close —
+ * the trail that shows where a hanging browser actually stops.
  */
-function startLocalProxy(px) {
+function startLocalProxy(px, onLog = null) {
+  const log = (m) => onLog && onLog(m);
   return new Promise((resolve, reject) => {
     const sockets = new Set();
     const server = net.createServer((client) => {
       sockets.add(client);
+      log(`proxy: +conn ${client.remoteAddress}:${client.remotePort}`);
       client.once('close', () => sockets.delete(client));
-      handleClient(client, px, sockets).catch(() => {
+      handleClient(client, px, sockets, log).catch((e) => {
+        log(`proxy: client error: ${String((e && e.message) || e).split('\n')[0].slice(0, 100)}`);
         try {
           client.destroy();
-        } catch (e) {
+        } catch (err) {
           /* gone */
         }
       });

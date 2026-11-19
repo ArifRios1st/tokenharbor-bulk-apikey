@@ -170,7 +170,7 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     // sits on about:blank until the navigation timeout). Node does the same
     // handshake in under a second, so the browser gets a plain no-auth HTTP
     // proxy on localhost and this module forwards upstream.
-    localProxy = await startLocalProxy(px);
+    localProxy = await startLocalProxy(px, log);
     args.push(`--proxy-server=http://127.0.0.1:${localProxy.port}`);
     log && log(`   local proxy on 127.0.0.1:${localProxy.port} -> ${px.host}:${px.port}`);
   } else if (px) {

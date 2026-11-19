@@ -13,6 +13,9 @@
  * Phases:
  *   A. Raw fetch over the parsed proxy (SOCKS5 handshake or HTTP CONNECT,
  *      then TLS + GET) with per-stage timings.
+ *   A2. The same raw fetch, but THROUGH the local proxy Chrome uses. If A
+ *      works and A2 fails, the forwarding proxy is broken on this machine;
+ *      if A2 works and B fails, the break is between Chrome and localhost.
  *   B. Browser + the same proxy: example.com, then target.
  *   C. If B is slow: browser + proxy with the resolved IPv4 literal, so a
  *      slow/broken DNS or IPv6 path for the proxy hostname is ruled out.
@@ -28,6 +31,7 @@ const fs = require('fs');
 const net = require('net');
 const tls = require('tls');
 const solver = require('../src/solver.js');
+const { startLocalProxy } = require('../src/local-proxy.js');
 
 const argv = process.argv.slice(2);
 const arg = (name, def = null) => {
@@ -352,6 +356,20 @@ async function main() {
     console.log('\n[A] skipped (no --pool or --proxy given)');
   }
 
+  // Phase A2 — the same raw fetch, but THROUGH the local proxy Chrome uses.
+  if (px && px.protocol.startsWith('socks') && px.username) {
+    console.log('\n[A2] raw fetch THROUGH the local proxy (same path Chrome takes)');
+    const local = await startLocalProxy(px, (m) => console.log(`      ${m.trim()}`));
+    try {
+      const via = await rawFetchViaHttpConnect({ proxyHost: '127.0.0.1', proxyPort: local.port, host: targetUrl.hostname, path: `${targetUrl.pathname}${targetUrl.search}`, timeoutMs: RAW_TIMEOUT });
+      results.viaLocal = via;
+      if (via.ok) console.log(`    OK in ${s(via.ms)} — ${via.status} (${via.bytes} bytes, challenge=${via.challenge})`);
+      else console.log(`    FAILED at ${via.stage} after ${s(via.ms)} — ${via.error}`);
+    } finally {
+      await local.close();
+    }
+  }
+
   // Phase B — browser + the same proxy, as real runs do.
   if (px) {
     console.log(`\n[B] browser + proxy ${px.host}:${px.port} (${px.protocol})`);
@@ -407,6 +425,7 @@ async function main() {
     return;
   }
   const raw = results.raw;
+  const via = results.viaLocal;
   const bp = results.browserProxy;
   const bIp = results.browserProxyIp;
   const bH1 = results.browserProxyH1;
@@ -417,12 +436,15 @@ async function main() {
     console.log('  This exit requires a username/password and none was given. The CLI and the browser both support it — put credentials in the pool line, e.g. socks5://user:pass@host:1080 (URL-encode special characters in the password), then re-run this diag.');
   } else if (raw && !raw.ok) {
     console.log('  The proxy itself fails the raw fetch — the exit (or the proxy path) is the problem, not the browser code.');
+  } else if (via && !via.ok) {
+    console.log('  The raw fetch works but the same fetch THROUGH the local proxy fails — the forwarding proxy is broken on this machine (see the proxy log lines above).');
   } else if (raw && raw.ms > 10000) {
     console.log(`  The raw fetch alone takes ${s(raw.ms)} — the exit is slow for everything. The browser needs several round trips through it, so it blows past every timeout. Try another exit.`);
   } else if (bp && !bp.ok && directOk(results.direct)) {
-    if (bIp && bIp.ok) console.log('  Browser+proxy fails but direct works AND the IPv4-literal proxy works — the proxy hostname resolution (DNS/IPv6) is the slow part.');
+    if (via && via.ok) console.log('  The local proxy fetches fine but Chrome hangs through it — the break is between Chrome and the localhost proxy (loopback/firewall), not the exit.');
+    else if (bIp && bIp.ok) console.log('  Browser+proxy fails but direct works AND the IPv4-literal proxy works — the proxy hostname resolution (DNS/IPv6) is the slow part.');
     else if (bH1 && bH1.ok) console.log('  Browser+proxy fails but direct works AND --disable-http2 fixes it — HTTP/2 through this exit is broken. The fix is launching with --disable-http2.');
-    else console.log('  Browser+proxy fails but direct works — the browser path through this exit is the problem (per-connection slowness the CLI avoids with one request). Try another exit, or the pool needs faster exits.');
+    else console.log('  Browser+proxy fails but direct works — the browser cannot use this exit. Check the local-proxy log lines above: no +conn lines means Chrome never reached the localhost proxy; upstream FAILED means the tunnel to the exit is broken.');
   } else if (bp && !bp.ok && !directOk(results.direct)) {
     console.log('  The browser is slow even direct — not the proxy. Browser, machine, or network outside the proxy.');
   } else if (bp && bp.ok && directOk(results.direct)) {
