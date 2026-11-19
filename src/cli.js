@@ -576,16 +576,20 @@ async function mintOne({ px, pool, index, total, log }) {
     ids = await discover(px, jar);
   } catch (e) {
     if (!/cloudflare challenge/i.test(e.message)) throw e;
-    // VPN/datacenter exits get the edge challenge instead of the form: solve it
-    // once in a real Chrome (same exit, same user agent) and carry the clearance
-    // cookie into this session, then read the form ids over HTTP as usual.
+    // VPN/datacenter exits get the edge challenge instead of the form: load it
+    // once in a real Chrome (same exit, same user agent) and carry the
+    // browser's cookies into this session, then read the form ids over HTTP
+    // as usual. Usually that includes cf_clearance; when the browser passes
+    // without ever facing the interstitial there is none, and the retry
+    // below finds out whether the other cookies are enough.
     log(`   cloudflare challenge — pre-solving it in the browser via ${px ? `${px.host}:${px.port}` : 'direct'}`);
     const { presolveChallenge } = require('./solver');
     const out = await presolveChallenge({ px, log, headless: !!arg('headless', false), ua: UA });
     if (!out || !out.ok) throw new Error(`cloudflare challenge not solved (${(out && out.why) || 'no response'})`);
     for (const c of out.cookies || []) jar.set(c.name, c.value);
-    steps.challenge = 'presolved';
-    log('   challenge pre-solved in the browser');
+    steps.challenge = out.clearance === false ? 'presolved-no-clearance' : 'presolved';
+    if (out.clearance === false) log('   no cf_clearance from the browser — retrying discover with its cookies anyway');
+    else log('   challenge pre-solved in the browser');
     ids = await discover(px, jar);
   }
   const fp = crypto.randomUUID();

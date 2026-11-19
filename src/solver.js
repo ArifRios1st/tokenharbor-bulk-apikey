@@ -487,15 +487,37 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
       const diag = await page.evaluate(() => ({ title: document.title, widget: !!document.querySelector('.cf-turnstile, [data-sitekey]') })).catch(() => ({}));
       return { ok: false, why: `challenge did not clear (title="${String(diag.title || '').slice(0, 40)}" widget=${diag.widget})` };
     }
-    const cookies = await page.cookies();
-    if (!cookies.some((c) => c.name === 'cf_clearance')) {
-      return { ok: false, why: 'challenge cleared but no cf_clearance cookie' };
-    }
-    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s`);
-    return { ok: true, cookies };
+    // The cookie can land a moment after the page looks clear; poll for it.
+    // If it never appears, the browser passed Cloudflare's checks without
+    // ever facing the interstitial (no challenge served, no cookie issued) —
+    // carry the cookies it DID get and let the HTTP retry decide whether
+    // they are enough, instead of failing an exit that might work.
+    const { found, cookies } = await waitForClearance(page);
+    const names = cookies.map((c) => c.name).join(', ') || '(none)';
+    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s${found ? '' : ` (no cf_clearance; browser cookies: ${names})`}`);
+    return { ok: true, cookies, clearance: found, cookieNames: cookies.map((c) => c.name) };
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
+/**
+ * Poll the page's cookies for cf_clearance until it appears or the timeout
+ * elapses. The challenge script can set the cookie a moment after the page
+ * itself looks clear, so a single snapshot right after the wait misses it.
+ * Returns { found, cookies } — cookies is the last snapshot. Callers log
+ * names only; values never leave the jar.
+ */
+async function waitForClearance(page, { timeoutMs = 10000, pollMs = 500 } = {}) {
+  const t0 = Date.now();
+  let cookies = [];
+  while (Date.now() - t0 < timeoutMs) {
+    cookies = await page.cookies().catch(() => []);
+    if (cookies.some((c) => c.name === 'cf_clearance')) return { found: true, cookies };
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  cookies = await page.cookies().catch(() => cookies);
+  return { found: cookies.some((c) => c.name === 'cf_clearance'), cookies };
+}
+
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, waitForClearance, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };

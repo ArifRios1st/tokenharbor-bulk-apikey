@@ -173,7 +173,9 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    the CLI; the device fingerprint and the timezone travel with the request, and the timezone is
    measured from the exit, not from your machine. If Cloudflare answers the login page with its
    edge challenge (`Just a moment...`, common on VPN/datacenter exits), a real Chrome
-   pre-solves it first and the clearance cookie is carried into the HTTP session.
+   loads it first and the browser's cookies are carried into the HTTP session
+   (usually including cf_clearance; if the browser passes without facing the
+   interstitial, the retry proceeds with whatever cookies it got).
    For SOCKS exits with a username, Chrome goes through a localhost forwarding
    proxy (`src/local-proxy.js`) instead of talking SOCKS itself, because Chrome's
    SOCKS5-auth handling hangs.
