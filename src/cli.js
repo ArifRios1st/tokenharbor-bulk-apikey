@@ -18,6 +18,10 @@
  * Chrome (src/solver.js, puppeteer-core, your installed Chrome) and the CLI continues
  * over HTTP with that browser's session.
  *
+ * When Cloudflare answers the login page with its edge challenge ("Just a moment..."),
+ * a real Chrome pre-solves it first and the clearance cookie is carried into the
+ * HTTP session, so VPN/datacenter exits can mint too.
+ *
  * Proxy is OPTIONAL: pass `--pool proxies.txt` and every request (and the browser)
  * leaves through your proxies; without it the CLI runs direct.
  */
@@ -109,6 +113,9 @@ class Jar {
   }
   keys() {
     return [...this.c.keys()];
+  }
+  entries() {
+    return [...this.c.entries()].map(([name, value]) => ({ name, value }));
   }
 }
 /** HTTP helper. `px` is a parsed proxy or null (direct). */
@@ -354,10 +361,27 @@ async function waitLink(mail, timeoutMs = 240000) {
   return null;
 }
 
+/** Cloudflare's edge challenge page ("Just a moment..."). The signup form itself also
+ * loads challenges.cloudflare.com for its Turnstile widget, so only the interstitial
+ * page's own markers count — never the Turnstile script URL. */
+function isChallengePage(html) {
+  const h = html || '';
+  return /<title>Just a moment\.\.\.<\/title>/i.test(h) || /id="cf-challenge"/i.test(h) || /window\._cf_chl_opt/i.test(h);
+}
+/** --screen verdict per exit: live (signup form), challenged (Cloudflare page),
+ * dead (anything else, including connect failures). */
+function classifyScreen(r) {
+  const text = r.text || '';
+  if (r.status === 200 && /Create your free account/i.test(text)) return 'live';
+  if (isChallengePage(text)) return 'challenged';
+  return 'dead';
+}
+
 /** Next.js server-action ids rotate on every deploy: read them from the live page. */
 async function discover(px, jar) {
   const r = await req(`${BASE}/login?mode=signup`, { px, jar, headers: { accept: 'text/html' } });
   const html = r.text;
+  if (isChallengePage(html)) throw new Error('cloudflare challenge page (Just a moment)');
   const deploy = (html.match(/data-dpl-id="([^"]+)"/) || [])[1];
   const action = (html.match(/\$ACTION_1:0" value="\{&quot;id&quot;:&quot;([^&]+)&quot;/) || [])[1];
   const actionKey = (html.match(/\$ACTION_KEY" value="([^"]+)"/) || [])[1];
@@ -547,7 +571,23 @@ async function mintOne({ px, pool, index, total, log }) {
   const mail = await makeMailbox(px);
   const password = `Th!${rand(12)}aQ9`;
   log(`[${index}/${total}] mailbox ${mail.address} (${mail.rail})`);
-  const ids = await discover(px, jar);
+  let ids;
+  try {
+    ids = await discover(px, jar);
+  } catch (e) {
+    if (!/cloudflare challenge/i.test(e.message)) throw e;
+    // VPN/datacenter exits get the edge challenge instead of the form: solve it
+    // once in a real Chrome (same exit, same user agent) and carry the clearance
+    // cookie into this session, then read the form ids over HTTP as usual.
+    log('   cloudflare challenge — pre-solving it in Chrome');
+    const { presolveChallenge } = require('./solver');
+    const out = await presolveChallenge({ px, log, headless: !!arg('headless', false), ua: UA });
+    if (!out || !out.ok) throw new Error(`cloudflare challenge not solved (${(out && out.why) || 'no response'})`);
+    for (const c of out.cookies || []) jar.set(c.name, c.value);
+    steps.challenge = 'presolved';
+    log('   challenge pre-solved in Chrome');
+    ids = await discover(px, jar);
+  }
   const fp = crypto.randomUUID();
   const tz = await tzFor(px);
   const pre = await req(`${BASE}/api/auth/signup-precheck?fp=${fp}`, {
@@ -582,7 +622,7 @@ async function mintOne({ px, pool, index, total, log }) {
   if (!session) {
     // Browser fallback: the widget's token and the session come from a real page.
     const { signupInBrowser } = require('./solver');
-    const out = await signupInBrowser({ px, email: mail.address, password, log, headless: !!arg('headless', false) });
+    const out = await signupInBrowser({ px, email: mail.address, password, log, headless: !!arg('headless', false), jarCookies: jar.entries() });
     if (!out || !out.ok) {
       const hasToken = Boolean(mailtrapToken());
       throw new Error(`signup blocked (${(out && out.why) || 'no response'}) — ${hasToken ? 'the panel is refusing sign-ups from this network; retry through a fresh proxy exit (--pool)' : 'the panel asks for a mailbox it trusts; add a Mailtrap token (mailtrap.txt) and retry'}`);
@@ -797,13 +837,17 @@ async function verifyKeys(px, log) {
     const list = px || [];
     if (!list.length) throw new Error('--screen needs --pool <file>');
     let live = 0;
+    let challenged = 0;
     for (const p of list) {
       const r = await req(BASE + '/login?mode=signup', { px: p, headers: { accept: 'text/html' }, timeoutMs: 20000 }).catch((e) => ({ status: 0, text: e.message }));
-      const ok = r.status === 200 && /Create your free account/i.test(r.text || '');
-      if (ok) live++;
-      log(`${p.host}:${p.port} ${ok ? 'live' : 'dead'}${ok ? '' : ' ' + String(r.text || r.status).slice(0, 60)}`);
+      const state = classifyScreen(r);
+      if (state === 'live') live++;
+      if (state === 'challenged') challenged++;
+      // A challenged exit speaks for itself; only a dead one needs the reason.
+      log(`${p.host}:${p.port} ${state}${state === 'dead' ? ' ' + String(r.text || r.status).slice(0, 60) : ''}`);
     }
-    log(`${live}/${list.length} exits reach Token Harbor`);
+    log(`${live}/${list.length} live, ${challenged} challenged (cloudflare), ${list.length - live - challenged} dead`);
+    if (challenged) log('challenged exits are not dead: minting pre-solves the challenge in Chrome');
     return;
   }
   if (arg('verify', false)) {
@@ -833,7 +877,7 @@ async function verifyKeys(px, log) {
         break;
       } catch (e) {
         lastErr = e;
-        const retryable = /proxy CONNECT|ECONNRESET|socket hang up|ETIMEDOUT|EAI_AGAIN|tz unreadable|create another account from this network|Too many sign-ups|signup refused: status 200/i.test(e.message);
+        const retryable = /proxy CONNECT|ECONNRESET|socket hang up|ETIMEDOUT|EAI_AGAIN|tz unreadable|create another account from this network|Too many sign-ups|signup refused: status 200|cloudflare challenge/i.test(e.message);
         if (!retryable || !px) break;
         log(`   exit failed (${e.message.slice(0, 60)}) — retrying on another exit`);
       }

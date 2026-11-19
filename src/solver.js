@@ -10,6 +10,10 @@
  * Chrome comes from `puppeteer-core` + the Chrome already installed on the machine
  * (`channel: 'chrome'`); `--enable-automation`, which puppeteer adds by default and
  * which Turnstile reads first, is suppressed on purpose.
+ *
+ * It also pre-solves Cloudflare's edge challenge page ("Just a moment..."):
+ * presolveChallenge() loads the login page in Chrome, waits for the challenge to
+ * clear, and returns the clearance cookies for the CLI's HTTP session.
  */
 const BASE = 'https://tokenharbor.ai';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -121,11 +125,16 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
  * Fill the signup form in a real browser, press the button, and let the page mint
  * both the captcha token and the session. Returns the session cookies.
  */
-async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false }) {
+async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false, jarCookies = [] }) {
   const browser = await launchBrowser({ px, headless });
   try {
     const page = await browser.newPage();
     await proxyAuth(page, px);
+    // Reuse the CLI session's cookies (e.g. cf_clearance from a pre-solved
+    // challenge) so the browser does not face the challenge again.
+    if (jarCookies.length) {
+      await page.setCookie(...jarCookies.map((c) => ({ name: c.name, value: c.value, domain: 'tokenharbor.ai', path: '/' }))).catch(() => {});
+    }
     try {
       await page.goto(`${BASE}/signup`, { waitUntil: 'domcontentloaded', timeout: 90000 });
     } catch (e) {
@@ -177,11 +186,20 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
         })
         .catch(() => {});
     };
+    // Success is leaving the signup page OR holding a session cookie: the form
+    // lives at /signup (no mode=signup in the URL), so testing for mode=signup
+    // was always true on the first check.
+    const done = async () => {
+      const gone = await page.evaluate(() => !/signup/.test(location.href)).catch(() => false);
+      if (gone) return true;
+      const cs = await page.cookies().catch(() => []);
+      return cs.some((c) => /^sb-auth-auth-token/.test(c.name));
+    };
     await press();
     let left = false;
     for (let i = 0; i < 20 && !left; i++) {
       await sleep(1500);
-      left = await page.evaluate(() => !/mode=signup/.test(location.href)).catch(() => false);
+      left = await done();
     }
     if (!left) {
       const token = await solveTurnstile(page, log);
@@ -193,15 +211,64 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
       await press();
       for (let i = 0; i < 20 && !left; i++) {
         await sleep(1500);
-        left = await page.evaluate(() => !/mode=signup/.test(location.href)).catch(() => false);
+        left = await done();
       }
     }
     const cookies = await page.cookies();
+    const hasSession = cookies.some((c) => /^sb-auth-auth-token/.test(c.name));
     const text = await page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => '');
-    return { ok: left, why: left ? '' : String(text).replace(/\s+/g, ' ').slice(0, 120), cookies };
+    const ok = left && hasSession;
+    return { ok, why: ok ? '' : left ? 'left the signup page without a session cookie' : String(text).replace(/\s+/g, ' ').slice(0, 120), cookies };
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser };
+/**
+ * Pass Cloudflare's edge challenge page ("Just a moment...") in a real browser
+ * and return the clearance cookies. The clearance is bound to the exit IP and the
+ * user agent, so the browser must use the same proxy and the same UA string the
+ * CLI sends over HTTP.
+ */
+async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null } = {}) {
+  const browser = await launchBrowser({ px, headless });
+  const t0 = Date.now();
+  try {
+    const page = await browser.newPage();
+    await proxyAuth(page, px);
+    if (ua) await page.setUserAgent(ua);
+    try {
+      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    } catch (e) {
+      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 60)})` };
+    }
+    // The challenge usually clears itself in a few seconds; wait for the real
+    // page instead of sleeping a fixed time. If an interactive checkbox shows
+    // up, solve it like the signup widget and wait again.
+    let cleared = false;
+    for (let round = 0; round < 3 && !cleared; round++) {
+      cleared = await page
+        .waitForFunction(() => !!document.querySelector('input[name="email"]') || !/Just a moment/.test(document.title), { timeout: 30000 })
+        .then(() => true)
+        .catch(() => false);
+      if (cleared) break;
+      const token = await solveTurnstile(page, log, { tries: 2, waitMs: 8000 });
+      log && log(`   challenge checkbox ${token ? 'solved' : 'no token'}`);
+      if (!token) break;
+    }
+    if (!cleared) {
+      const diag = await page.evaluate(() => ({ title: document.title, widget: !!document.querySelector('.cf-turnstile, [data-sitekey]') })).catch(() => ({}));
+      return { ok: false, why: `challenge did not clear (title="${String(diag.title || '').slice(0, 40)}" widget=${diag.widget})` };
+    }
+    const cookies = await page.cookies();
+    if (!cookies.some((c) => c.name === 'cf_clearance')) {
+      return { ok: false, why: 'challenge cleared but no cf_clearance cookie' };
+    }
+    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s`);
+    return { ok: true, cookies };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge };

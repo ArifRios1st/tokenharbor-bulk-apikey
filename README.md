@@ -171,7 +171,9 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
 2. **Sign-up** — the Next.js server-action ids (`next-action`, `$ACTION_KEY`,
    `x-deployment-id`) are read from the live page every run, so a panel redeploy does not break
    the CLI; the device fingerprint and the timezone travel with the request, and the timezone is
-   measured from the exit, not from your machine.
+   measured from the exit, not from your machine. If Cloudflare answers the login page with its
+   edge challenge (`Just a moment...`, common on VPN/datacenter exits), a real Chrome
+   pre-solves it first and the clearance cookie is carried into the HTTP session.
 3. **Human check** — when the panel renders the widget, the sign-up is replayed in a real Chrome
    (`src/solver.js`, `puppeteer-core` + the Chrome already installed; `--enable-automation` is
    suppressed on purpose), the checkbox is clicked with the mouse, and that browser's session
@@ -206,7 +208,7 @@ node src/cli.js --help
 | `--count <n>` | accounts (and keys) to create, default 1 |
 | `--pool <file>` | proxy list, one exit per line (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); inline `#` comments are fine |
 | `--headless` | run the fallback browser headless (default: off-screen window, which is what the captcha expects) |
-| `--screen` | test the pool against the panel and print live/dead per exit |
+| `--screen` | test the pool against the panel and print live / challenged (cloudflare) / dead per exit; challenged exits can still mint, the challenge is pre-solved in Chrome |
 | `--verify` | live-verify `keys.txt`; dead keys are written to `keys-dead.txt` |
 | `--models` | print the free model ids |
 | `--strict-proxy` | never send a direct request: the live gate must also go through the pool (env `TOKENHARBOR_STRICT=1` does the same) |
