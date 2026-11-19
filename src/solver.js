@@ -7,9 +7,10 @@
  * the page's own state are what make it pass — nothing is pasted and no captcha
  * service is called.
  *
- * The browser comes from `puppeteer-core` + the Chrome or Brave already installed
- * on the machine (`channel: 'chrome'`, then well-known install paths, then the
- * `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` / `BRAVE_PATH` env override);
+ * The browser comes from `puppeteer-core` + a Chromium on the machine, in this
+ * order: `channel: 'chrome'`, the env override (`PUPPETEER_EXECUTABLE_PATH` /
+ * `CHROME_PATH` / `BRAVE_PATH`), Chrome from the puppeteer cache (`npx puppeteer
+ * browsers install chrome`), then well-known Brave/Chrome install paths;
  * `--enable-automation`, which puppeteer adds by default and which Turnstile reads
  * first, is suppressed on purpose.
  *
@@ -18,6 +19,8 @@
  * clear, and returns the clearance cookies for the CLI's HTTP session.
  */
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const BASE = 'https://tokenharbor.ai';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -30,13 +33,70 @@ function isNavigationTimeout(e) {
   return /timeout|exceeded/i.test(String((e && e.message) || e));
 }
 
-/** Find a Chromium executable: explicit env override first, then well-known
- * install locations. Brave is Chromium, puppeteer-core drives it the same way. */
+/** Resource types the Cloudflare challenge never needs. Blocking them keeps a
+ * slow exit's bandwidth for the challenge scripts. */
+function shouldBlockResource(type) {
+  return ['image', 'stylesheet', 'font', 'media'].includes(type);
+}
+
+/** Chrome installed by `npx puppeteer browsers install chrome` lives in the
+ * puppeteer cache (~/.cache/puppeteer, or PUPPETEER_CACHE_DIR), which neither
+ * channel resolution nor the system install paths look at. Layout:
+ * chrome/<platform>-<buildId>/chrome-<platform>/<exe>. Newest install wins. */
+function findPuppeteerChrome() {
+  const cache = process.env['PUPPETEER_CACHE_DIR'] || path.join(os.homedir(), '.cache', 'puppeteer');
+  const chromeDir = path.join(cache, 'chrome');
+  let entries;
+  try {
+    entries = fs.readdirSync(chromeDir, { withFileTypes: true });
+  } catch (e) {
+    return null;
+  }
+  const plats =
+    process.platform === 'win32'
+      ? ['win64', 'win32']
+      : process.platform === 'darwin'
+        ? [process.arch === 'arm64' ? 'mac-arm64' : 'mac-x64', process.arch === 'arm64' ? 'mac-x64' : 'mac-arm64']
+        : ['linux-64'];
+  for (const plat of plats) {
+    const exeRel =
+      process.platform === 'win32'
+        ? path.join(`chrome-${plat}`, 'chrome.exe')
+        : process.platform === 'darwin'
+          ? path.join(`chrome-${plat}`, 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing')
+          : path.join(`chrome-${plat}`, 'chrome');
+    const dirs = entries
+      .filter((d) => d.isDirectory() && d.name.startsWith(`${plat}-`))
+      .map((d) => path.join(chromeDir, d.name))
+      .sort((a, b) => {
+        try {
+          return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+        } catch (e) {
+          return 0;
+        }
+      });
+    for (const dir of dirs) {
+      const exe = path.join(dir, exeRel);
+      try {
+        if (fs.existsSync(exe)) return exe;
+      } catch (e) {
+        /* next */
+      }
+    }
+  }
+  return null;
+}
+
+/** Find a Chromium executable: explicit env override first, then the puppeteer
+ * cache, then well-known install locations. Brave is Chromium, puppeteer-core
+ * drives it the same way. */
 function findBrowserExecutable() {
   for (const v of ['PUPPETEER_EXECUTABLE_PATH', 'CHROME_PATH', 'BRAVE_PATH']) {
     const p = process.env[v];
     if (p && fs.existsSync(p)) return p;
   }
+  const cached = findPuppeteerChrome();
+  if (cached) return cached;
   const candidates = [];
   if (process.platform === 'win32') {
     const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
@@ -69,7 +129,7 @@ function findBrowserExecutable() {
   return null;
 }
 
-async function launchBrowser({ px = null, headless = false } = {}) {
+async function launchBrowser({ px = null, headless = false, log = null } = {}) {
   const puppeteer = require('puppeteer-core');
   // The background flags matter on slow proxies: without them the browser phones
   // home (component updates, variations, sync) through the proxy at startup and
@@ -91,13 +151,16 @@ async function launchBrowser({ px = null, headless = false } = {}) {
     args.push(`--proxy-server=${scheme}://${px.host}:${px.port}`);
   }
   const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
-  const attempts = [{ ...options, channel: 'chrome' }];
+  const attempts = [{ ...options, channel: 'chrome', label: "Chrome (channel 'chrome')" }];
   const exe = findBrowserExecutable();
-  if (exe) attempts.push({ ...options, executablePath: exe });
+  if (exe) attempts.push({ ...options, executablePath: exe, label: exe });
   let lastErr = null;
   for (const attempt of attempts) {
+    const { label, ...launchOpts } = attempt;
     try {
-      return await puppeteer.launch(attempt);
+      const browser = await puppeteer.launch(launchOpts);
+      log && log(`   using browser: ${label}`);
+      return browser;
     } catch (e) {
       lastErr = e;
     }
@@ -197,7 +260,7 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
  * both the captcha token and the session. Returns the session cookies.
  */
 async function signupInBrowser({ px = null, email, password, log = () => {}, headless = false, jarCookies = [] }) {
-  const browser = await launchBrowser({ px, headless });
+  const browser = await launchBrowser({ px, headless, log });
   try {
     const page = await browser.newPage();
     await proxyAuth(page, px);
@@ -307,12 +370,28 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
  * CLI sends over HTTP.
  */
 async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null } = {}) {
-  const browser = await launchBrowser({ px, headless });
+  const browser = await launchBrowser({ px, headless, log });
   const t0 = Date.now();
   try {
     const page = await browser.newPage();
     await proxyAuth(page, px);
     if (ua) await page.setUserAgent(ua);
+    // Block what the challenge never needs (images, fonts, stylesheets): on a
+    // slow exit they eat the bandwidth the challenge scripts need. Only when
+    // there is no proxy auth — proxyAuth() enables the Fetch domain for auth,
+    // and interception uses the same domain.
+    if (!px || !px.username) {
+      const intercepted = await page
+        .setRequestInterception(true)
+        .then(() => true)
+        .catch(() => false);
+      if (intercepted) {
+        page.on('request', (req) => {
+          if (shouldBlockResource(req.resourceType())) req.abort().catch(() => {});
+          else req.continue().catch(() => {});
+        });
+      }
+    }
     try {
       // NOTE: 'commit' is not a valid waitUntil for puppeteer-core goto — it
       // throws "Unknown value for options.waitUntil". domcontentloaded stays,
@@ -356,4 +435,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable, isNavigationTimeout };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
