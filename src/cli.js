@@ -48,6 +48,16 @@ const FREE_FALLBACK = 'deepseek-v4-flash:free';
 const LINK_RE = /https:\/\/tokenharbor\.ai\/verify-email\?token=[\w.\-]+/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rand = (n) => crypto.randomBytes(n).toString('hex').slice(0, n);
+// WebKit-style random string: Chrome's multipart boundary suffix is 16 chars
+// from [A-Za-z0-9] (HAR 2026-11-20: 3gIGVM5g47fegDux). rand() is hex-only,
+// and a hex-only boundary never occurs in a real browser submission.
+const randAlphaNum = (n) => {
+  const cs = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const b = crypto.randomBytes(n);
+  let s = '';
+  for (let i = 0; i < n; i++) s += cs[b[i] % cs.length];
+  return s;
+};
 
 function arg(name, fallback) {
   const i = process.argv.indexOf('--' + name);
@@ -401,7 +411,7 @@ async function discover(transport) {
 // difference between tool and manual signups, and the prime suspect for tool
 // keys rate-limiting while manual ones do not.
 function signupBody({ fp, tz, email, password, turnstile }) {
-  const b = '----WebKitFormBoundary' + rand(16);
+  const b = '----WebKitFormBoundary' + randAlphaNum(16);
   const f = [
     ['_1_device_fingerprint', fp],
     ['_1_timezone', tz],
@@ -777,12 +787,16 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
   }
   const loc = r.headers.location;
   if (loc) await transport.req(loc.startsWith('http') ? loc : BASE + loc, { headers: { accept: 'text/html' } }).catch(() => {});
+  // The browser beacons /dashboard again after the verification landing
+  // (HAR 2026-11-20, entry 191) — the second of its two /dashboard beacons.
+  steps.activityDashboardAfterVerify = await activity(transport, '/dashboard');
+  log(`   activity /dashboard ${steps.activityDashboardAfterVerify}`);
   steps.activityKeysBefore = await activity(transport, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysBefore}`);
   r = await transport.req(`${BASE}/api/keys`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json', origin: BASE, referer: `${BASE}/dashboard/api-keys` },
-    body: JSON.stringify({ label: 'bulk' }),
+    body: JSON.stringify({ label: 'default' }),
   });
   steps.key = r.status;
   log(`   key ${r.status}`);

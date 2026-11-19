@@ -152,6 +152,7 @@ Measured end to end (`node src/cli.js --auto --count 1 --pool proxies.txt`):
    consent text live (1464 chars)
    consent 200
    verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
    activity /dashboard/api-keys 200
    key 201
    activity /dashboard/api-keys 200
@@ -194,7 +195,8 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    verification, the way the browser does it. Right after sign-up, the CLI also sends the
    dashboard's page-view beacon (`POST /api/auth/activity?page=%2Fdashboard`).
 5. **E-mail verification** — the link from the mailbox is opened; the token is consumed
-   server-side and answers `307 → /dashboard?verify=success`.
+   server-side and answers `307 → /dashboard?verify=success`. The dashboard beacon fires
+   again after the verification landing, the way the browser does it.
 6. **Key + live gate** — activity beacons (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
    before and after `POST /api/keys`. The account login (`email:password`) is saved to
    `accounts.txt` as soon as the key exists, so the account can be opened manually in a
