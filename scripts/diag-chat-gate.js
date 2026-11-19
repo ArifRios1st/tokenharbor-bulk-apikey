@@ -88,7 +88,9 @@ async function probeChatInPage({ url, key, model, timeoutMs }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let firstBytes = '';
+  let bodyText = '';
   let total = 0;
+  const dec = new TextDecoder();
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -99,7 +101,6 @@ async function probeChatInPage({ url, key, model, timeoutMs }) {
     });
     events.push({ at: Date.now() - t0, ev: 'headers', status: r.status, ct: r.headers.get('content-type') || '' });
     const reader = r.body.getReader();
-    const dec = new TextDecoder();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) {
@@ -107,13 +108,17 @@ async function probeChatInPage({ url, key, model, timeoutMs }) {
         break;
       }
       total += value.length;
-      if (!firstBytes) firstBytes = dec.decode(value.slice(0, 200));
+      bodyText += dec.decode(value, { stream: true });
       if (events.length < 40) events.push({ at: Date.now() - t0, ev: 'chunk', bytes: value.length, total });
     }
-    return { ok: true, events, firstBytes, total };
+    bodyText += dec.decode();
+    firstBytes = bodyText.slice(0, 200);
+    return { ok: true, events, firstBytes, bodyText, total };
   } catch (e) {
     events.push({ at: Date.now() - t0, ev: 'error', name: (e && e.name) || 'error', message: String((e && e.message) || e).slice(0, 120) });
-    return { ok: false, events, firstBytes, total };
+    bodyText += dec.decode();
+    firstBytes = bodyText.slice(0, 200);
+    return { ok: false, events, firstBytes, bodyText, total };
   } finally {
     clearTimeout(timer);
   }
@@ -152,7 +157,7 @@ async function main() {
     const err = res.events.find((e) => e.ev === 'error');
     console.log('verdict:');
     if (done && headers && headers.status === 200) {
-      const looksJson = res.firstBytes.trimStart().startsWith('{');
+      const looksJson = (res.bodyText || res.firstBytes).trimStart().startsWith('{');
       console.log(`  the model answered in ${(done.at / 1000).toFixed(1)}s (${res.total} bytes, ${looksJson ? 'JSON' : 'not JSON — first bytes above'}) — the key is live`);
       if (done.at > 60000) console.log('  ...but slower than the old 60s gate timeout, which is why the mint failed the gate');
     } else if (done) {
