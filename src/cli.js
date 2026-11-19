@@ -108,6 +108,9 @@ class Jar {
   set(name, value) {
     if (value) this.c.set(name, value);
   }
+  clear() {
+    this.c.clear();
+  }
   has(name) {
     return this.c.has(name);
   }
@@ -586,10 +589,16 @@ async function mintOne({ px, pool, index, total, log }) {
     const { presolveChallenge } = require('./solver');
     const out = await presolveChallenge({ px, log, headless: !!arg('headless', false), ua: UA });
     if (!out || !out.ok) throw new Error(`cloudflare challenge not solved (${(out && out.why) || 'no response'})`);
+    // The jar currently holds only the challenge response's own cookies —
+    // drop them, or the retry sends the challenge's markers alongside the
+    // clearance. Only what the browser got goes back.
+    jar.clear();
     for (const c of out.cookies || []) jar.set(c.name, c.value);
     steps.challenge = out.clearance === false ? 'presolved-no-clearance' : 'presolved';
     if (out.clearance === false) log('   no cf_clearance from the browser — retrying discover with its cookies anyway');
     else log('   challenge pre-solved in the browser');
+    const cf = (out.cookies || []).find((c) => c.name === 'cf_clearance');
+    log(`   retrying discover with browser cookies: ${jar.keys().join(', ') || '(none)'}${cf ? ` (cf_clearance ${String(cf.value).length} chars)` : ' (no cf_clearance)'}`);
     ids = await discover(px, jar);
   }
   const fp = crypto.randomUUID();
