@@ -165,7 +165,7 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     ...extraArgs,
   ];
   let localProxy = null;
-  if (px && px.protocol && px.protocol.startsWith('socks') && px.username) {
+  if (usesLocalProxy(px)) {
     // Chrome's SOCKS5-auth handling hangs (no dialog, no CDP event, the tab
     // sits on about:blank until the navigation timeout). Node does the same
     // handshake in under a second, so the browser gets a plain no-auth HTTP
@@ -207,8 +207,29 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
   );
 }
 
+/**
+ * True when the browser talks to the exit through the local forwarding proxy
+ * instead of SOCKS directly: a SOCKS entry with a username. Chrome then sees
+ * a plain no-auth proxy on localhost, so no proxy auth challenge can ever
+ * appear — proxyAuth() must stay out of the way, because enabling the CDP
+ * Fetch domain for auth stalls the page's requests in this setup (the TLS
+ * handshake completes, the HTTP request never leaves Chrome).
+ */
+function usesLocalProxy(px) {
+  return !!(px && px.protocol && px.protocol.startsWith('socks') && px.username);
+}
+
+/**
+ * Answer proxy auth challenges in the browser via the CDP Fetch domain.
+ * Chrome shows a native login dialog for proxy auth, which no script can
+ * answer; this session answers with the pool credentials instead. Auth-only:
+ * Fetch.enable is called WITHOUT patterns — a pattern pauses every matching
+ * request until Fetch.continueRequest, which nothing here calls. A no-op
+ * without a username, without a proxy, or when the browser goes through the
+ * local proxy (see usesLocalProxy).
+ */
 async function proxyAuth(page, px, log = null) {
-  if (!px || !px.username) return;
+  if (!px || !px.username || usesLocalProxy(px)) return;
   const cdp = await page.target().createCDPSession();
   await cdp.send('Fetch.enable', { handleAuthRequests: true });
   cdp.on('Fetch.authRequired', async (e) => {
@@ -418,9 +439,11 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
     if (ua) await page.setUserAgent(ua);
     // Block what the challenge never needs (images, fonts, stylesheets): on a
     // slow exit they eat the bandwidth the challenge scripts need. Only when
-    // there is no proxy auth — proxyAuth() enables the Fetch domain for auth,
-    // and interception uses the same domain.
-    if (!px || !px.username) {
+    // proxyAuth() did not claim the Fetch domain for auth — interception uses
+    // the same domain. proxyAuth claims it only for HTTP proxies with a
+    // username; for SOCKS the browser goes through the no-auth local proxy,
+    // so the domain stays free and blocking works there too.
+    if (!px || !px.username || usesLocalProxy(px)) {
       const intercepted = await page
         .setRequestInterception(true)
         .then(() => true)
@@ -475,4 +498,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, proxyServerArg, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };

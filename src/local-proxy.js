@@ -284,7 +284,10 @@ async function handleClient(client, px, sockets, log) {
  * the trail that shows where a hanging browser actually stops.
  */
 function startLocalProxy(px, onLog = null) {
-  const log = (m) => onLog && onLog(m);
+  const t0 = Date.now();
+  // Relative timestamps: they show whether a tunnel died right after the
+  // handshake or only when the browser closed, which the bare log cannot.
+  const log = (m) => onLog && onLog(`[+${((Date.now() - t0) / 1000).toFixed(3)}s] ${m}`);
   return new Promise((resolve, reject) => {
     const sockets = new Set();
     const server = net.createServer((client) => {

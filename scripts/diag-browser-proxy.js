@@ -441,7 +441,7 @@ async function main() {
   } else if (raw && raw.ms > 10000) {
     console.log(`  The raw fetch alone takes ${s(raw.ms)} — the exit is slow for everything. The browser needs several round trips through it, so it blows past every timeout. Try another exit.`);
   } else if (bp && !bp.ok && directOk(results.direct)) {
-    if (via && via.ok) console.log('  The local proxy fetches fine but Chrome hangs through it — the break is between Chrome and the localhost proxy (loopback/firewall), not the exit.');
+    if (via && via.ok) console.log('  The local proxy fetches fine but Chrome hangs through it — the exit and the forwarding path are both fine; the break is inside the browser. Check the proxy log timestamps: tunnels closing right after the handshake means the page requests never left Chrome.');
     else if (bIp && bIp.ok) console.log('  Browser+proxy fails but direct works AND the IPv4-literal proxy works — the proxy hostname resolution (DNS/IPv6) is the slow part.');
     else if (bH1 && bH1.ok) console.log('  Browser+proxy fails but direct works AND --disable-http2 fixes it — HTTP/2 through this exit is broken. The fix is launching with --disable-http2.');
     else console.log('  Browser+proxy fails but direct works — the browser cannot use this exit. Check the local-proxy log lines above: no +conn lines means Chrome never reached the localhost proxy; upstream FAILED means the tunnel to the exit is broken.');
