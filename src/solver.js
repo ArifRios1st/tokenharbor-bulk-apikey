@@ -14,9 +14,13 @@
  * `--enable-automation`, which puppeteer adds by default and which Turnstile reads
  * first, is suppressed on purpose.
  *
- * It also pre-solves Cloudflare's edge challenge page ("Just a moment..."):
- * presolveChallenge() loads the login page in Chrome, waits for the challenge to
- * clear, and returns the clearance cookies for the CLI's HTTP session.
+ * It also runs the mint through the browser when Cloudflare's edge challenge
+ * page ("Just a moment...") blocks the CLI's HTTP stack: openBrowserClient()
+ * loads the login page in Chrome, waits for the challenge to clear, and returns
+ * a client whose requests run as same-origin fetch() inside the page. The
+ * clearance cookie alone is not enough — it is bound to the solving client's
+ * TLS fingerprint, so Node requests stay challenged even with it in the jar.
+ * presolveChallenge() (cookies only) is kept for callers that need just that.
  *
  * For SOCKS proxies with a username, the browser never talks SOCKS: Chrome's
  * SOCKS5-auth handling hangs (no dialog, no CDP event, about:blank until the
@@ -425,12 +429,83 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
 }
 
 /**
- * Pass Cloudflare's edge challenge page ("Just a moment...") in a real browser
- * and return the clearance cookies. The clearance is bound to the exit IP and the
- * user agent, so the browser must use the same proxy and the same UA string the
- * CLI sends over HTTP.
+ * Runs inside the page (page.evaluate): a same-origin fetch with a timeout,
+ * returning { status, headers, text } — the same shape the CLI's req() does.
+ * Self-contained on purpose: puppeteer serializes this function into the
+ * page, so it must not close over anything. Exported so the VM tests can run
+ * it against a local server with Node's own fetch.
  */
-async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null } = {}) {
+async function browserFetchInPage({ url, method = 'GET', headers = {}, body = null, timeoutMs = 45000 }) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { method, headers, body, credentials: 'include', signal: ctrl.signal });
+    const text = await r.text();
+    const hdrs = {};
+    r.headers.forEach((v, k) => { hdrs[k] = v; });
+    return { status: r.status, headers: hdrs, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Builds the transport interface over a page that already cleared the edge
+ * challenge. It speaks the same shape as the CLI's req():
+ *   req(url, { method, headers, body, timeoutMs }) -> { status, headers, text }
+ *   session() -> whether a Supabase session cookie is in the browser store
+ *   setCookies(cookies) -> puts cookies (e.g. from the signup fallback)
+ *     into the browser store so later requests carry them
+ *   cookies() -> the page's cookies
+ *   close() -> closes the browser
+ */
+function browserClientFromPage(page, browser) {
+  return {
+    kind: 'browser',
+    req(url, opts = {}) {
+      return page.evaluate(browserFetchInPage, {
+        url,
+        method: opts.method || 'GET',
+        headers: opts.headers || {},
+        body: opts.body ?? null,
+        timeoutMs: opts.timeoutMs || 45000,
+      });
+    },
+    async session() {
+      const cookies = await page.cookies().catch(() => []);
+      return cookies.some((c) => /^sb-auth-auth-token/.test(c.name));
+    },
+    async setCookies(cookies) {
+      for (const c of cookies || []) {
+        try {
+          await page.setCookie({ name: c.name, value: c.value, domain: c.domain || 'tokenharbor.ai', path: c.path || '/' });
+        } catch (e) {
+          /* a cookie the page cannot take is skipped */
+        }
+      }
+    },
+    cookies() {
+      return page.cookies();
+    },
+    async close() {
+      await browser.close().catch(() => {});
+    },
+  };
+}
+
+/**
+ * Opens a real Chrome on the login page, waits out Cloudflare's edge
+ * challenge, and returns a browser-backed HTTP client for the tokenharbor.ai
+ * origin. Requests run as same-origin fetch() inside the page, so they carry
+ * the browser's TLS fingerprint and cookies — the combination the edge
+ * accepts. The harvested cf_clearance is bound to the solving client's TLS
+ * fingerprint (proven 2026-11-19: a clean jar holding only a 359-char
+ * clearance still got "Just a moment" over Node HTTP on 8 exits), so Node
+ * requests stay challenged even with the cookie — only the browser's own
+ * stack passes. Close the client with client.close() when the mint is done.
+ * Throws when the browser cannot launch or the page never clears.
+ */
+async function openBrowserClient({ px = null, log = () => {}, headless = false, ua = null } = {}) {
   const browser = await launchBrowser({ px, headless, log });
   const t0 = Date.now();
   try {
@@ -442,7 +517,9 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
     // proxyAuth() did not claim the Fetch domain for auth — interception uses
     // the same domain. proxyAuth claims it only for HTTP proxies with a
     // username; for SOCKS the browser goes through the no-auth local proxy,
-    // so the domain stays free and blocking works there too.
+    // so the domain stays free and blocking works there too. Switched off
+    // again once the page clears, so the API calls below run through plain
+    // fetch with nothing in the way.
     if (!px || !px.username || usesLocalProxy(px)) {
       const intercepted = await page
         .setRequestInterception(true)
@@ -465,7 +542,7 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
       // A timeout is not a failure: the page keeps loading in the background
       // and the challenge wait below covers it. Only a net::ERR_* fails here.
       if (!isNavigationTimeout(e)) {
-        return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+        throw new Error(`browser could not load the page (${String(e.message).slice(0, 200)})`);
       }
       log && log('   challenge page still loading after 30s, watching for the challenge anyway');
     }
@@ -485,19 +562,44 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
     }
     if (!cleared) {
       const diag = await page.evaluate(() => ({ title: document.title, widget: !!document.querySelector('.cf-turnstile, [data-sitekey]') })).catch(() => ({}));
-      return { ok: false, why: `challenge did not clear (title="${String(diag.title || '').slice(0, 40)}" widget=${diag.widget})` };
+      throw new Error(`challenge did not clear (title="${String(diag.title || '').slice(0, 40)}" widget=${diag.widget})`);
     }
     // The cookie can land a moment after the page looks clear; poll for it.
-    // If it never appears, the browser passed Cloudflare's checks without
-    // ever facing the interstitial (no challenge served, no cookie issued) —
-    // carry the cookies it DID get and let the HTTP retry decide whether
-    // they are enough, instead of failing an exit that might work.
-    const { found, cookies } = await waitForClearance(page);
+    // A missing cookie is not fatal here — the page cleared, and requests
+    // from this page carry the browser's fingerprint either way.
+    const { found } = await waitForClearance(page);
+    await page.setRequestInterception(false).catch(() => {});
+    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s${found ? '' : ' (no cf_clearance cookie — using the browser session as-is)'}`);
+    return browserClientFromPage(page, browser);
+  } catch (e) {
+    await browser.close().catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Pass Cloudflare's edge challenge page ("Just a moment...") in a real
+ * browser and return the clearance cookies. Kept for callers that only need
+ * the cookies — the mint itself now runs its requests through
+ * openBrowserClient, because the clearance is bound to the solving client's
+ * TLS fingerprint and Node requests stay challenged even with the cookie in
+ * the jar.
+ */
+async function presolveChallenge({ px = null, log = () => {}, headless = false, ua = null } = {}) {
+  let client;
+  try {
+    client = await openBrowserClient({ px, log, headless, ua });
+  } catch (e) {
+    return { ok: false, why: e.message };
+  }
+  try {
+    const cookies = await client.cookies();
+    const found = cookies.some((c) => c.name === 'cf_clearance');
     const names = cookies.map((c) => c.name).join(', ') || '(none)';
-    log && log(`   challenge cleared in ${Math.round((Date.now() - t0) / 1000)}s${found ? '' : ` (no cf_clearance; browser cookies: ${names})`}`);
+    if (!found) log && log(`   challenge cleared (no cf_clearance; browser cookies: ${names})`);
     return { ok: true, cookies, clearance: found, cookieNames: cookies.map((c) => c.name) };
   } finally {
-    await browser.close().catch(() => {});
+    await client.close().catch(() => {});
   }
 }
 
@@ -520,4 +622,4 @@ async function waitForClearance(page, { timeoutMs = 10000, pollMs = 500 } = {}) 
   return { found: cookies.some((c) => c.name === 'cf_clearance'), cookies };
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, waitForClearance, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, openBrowserClient, browserClientFromPage, browserFetchInPage, waitForClearance, proxyAuth, proxyServerArg, usesLocalProxy, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };

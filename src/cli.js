@@ -380,9 +380,11 @@ function classifyScreen(r) {
   return 'dead';
 }
 
-/** Next.js server-action ids rotate on every deploy: read them from the live page. */
-async function discover(px, jar) {
-  const r = await req(`${BASE}/login?mode=signup`, { px, jar, headers: { accept: 'text/html' } });
+/** Next.js server-action ids rotate on every deploy: read them from the live page.
+ * `transport` is whichever one the mint is using (plain HTTP or the browser
+ * client) — discover runs over it either way. */
+async function discover(transport) {
+  const r = await transport.req(`${BASE}/login?mode=signup`, { headers: { accept: 'text/html' } });
   const html = r.text;
   if (isChallengePage(html)) throw new Error('cloudflare challenge page (Just a moment)');
   const deploy = (html.match(/data-dpl-id="([^"]+)"/) || [])[1];
@@ -412,11 +414,9 @@ function signupBody({ action, actionKey, fp, tz, email, password, turnstile }) {
 }
 const RST =
   '%5B%22%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C4096%5D%7D%2Cnull%2Cnull%2C4096%5D%7D%2Cnull%2Cnull%2C4116%5D';
-async function submitSignup({ px, jar, ids, fp, tz, email, password, turnstile }) {
+async function submitSignup({ transport, ids, fp, tz, email, password, turnstile }) {
   const { body, boundary } = signupBody({ action: ids.action, actionKey: ids.actionKey, fp, tz, email, password, turnstile });
-  return req(`${BASE}/login?mode=signup`, {
-    px,
-    jar,
+  return transport.req(`${BASE}/login?mode=signup`, {
     method: 'POST',
     headers: {
       accept: 'text/x-component',
@@ -446,11 +446,9 @@ async function tzFor(px) {
 /** Page-view activity beacon the dashboard sends on every page view (HAR 2026-11-19):
  * POST, no body, accept-anything header, `origin: BASE`, `referer` = the page URL.
  * Best-effort: a failed beacon must never fail the account. Returns the status (0 on error). */
-async function activity(px, jar, page) {
+async function activity(transport, page) {
   try {
-    const r = await req(`${BASE}/api/auth/activity?page=${encodeURIComponent(page)}`, {
-      px,
-      jar,
+    const r = await transport.req(`${BASE}/api/auth/activity?page=${encodeURIComponent(page)}`, {
       method: 'POST',
       headers: { accept: '*/*', origin: BASE, referer: `${BASE}${page}` },
       timeoutMs: 20000,
@@ -522,14 +520,14 @@ function assembleConsentText(labels, s) {
   const p2 = `Turn on free models to start using them. You can turn this off anytime. ${s.u}`;
   return `${p1}\n\n${p2}`;
 }
-async function fetchConsentText({ px, jar }) {
-  const dash = await req(`${BASE}/dashboard`, { px, jar, headers: { accept: 'text/html' }, timeoutMs: 30000 });
+async function fetchConsentText(transport) {
+  const dash = await transport.req(`${BASE}/dashboard`, { headers: { accept: 'text/html' }, timeoutMs: 30000 });
   if (dash.status !== 200) throw new Error(`dashboard ${dash.status}`);
   const chunks = [...new Set(dash.text.match(/\/_next\/static\/[^"'()\s]+\.js/g) || [])];
   let strings = null;
   for (const c of chunks.slice(0, 40)) {
     try {
-      const r = await req(BASE + c, { px, headers: { accept: '*/*' }, timeoutMs: 20000 });
+      const r = await transport.req(BASE + c, { headers: { accept: '*/*' }, timeoutMs: 20000 });
       if (r.status === 200 && r.text.includes(CONSENT_MARKER)) {
         strings = extractConsentStrings(r.text);
         break;
@@ -541,7 +539,7 @@ async function fetchConsentText({ px, jar }) {
   if (!strings) throw new Error('consent chunk not found in dashboard scripts');
   let labels = [];
   try {
-    const ft = await req(`${BASE}/api/me/free-tier`, { px, jar, headers: { accept: 'application/json' }, timeoutMs: 20000 });
+    const ft = await transport.req(`${BASE}/api/me/free-tier`, { headers: { accept: 'application/json' }, timeoutMs: 20000 });
     const j = JSON.parse(ft.text);
     if (Array.isArray(j.model_labels)) labels = j.model_labels;
   } catch (e) {
@@ -567,45 +565,69 @@ function saveAccount(email, password) {
   }
 }
 
-/** One account end to end. Returns { key, steps }. */
-async function mintOne({ px, pool, index, total, log }) {
+/** Plain-HTTP transport: the CLI's own req() with this mint's proxy and jar.
+ * It speaks the same interface as the browser client (req / session /
+ * setCookies), so mintOne can switch between them without changing any call
+ * site. */
+function httpTransport(px, jar) {
+  return {
+    kind: 'http',
+    req: (url, opts = {}) => req(url, { px, jar, ...opts }),
+    // Awaited uniformly with the browser client's async session(); a plain
+    // value is fine here.
+    session: () => jar.keys().some((k) => /^sb-auth-auth-token/.test(k)),
+    setCookies: (cookies) => {
+      for (const c of cookies || []) jar.set(c.name, c.value);
+    },
+  };
+}
+
+/** One account end to end. Returns { key, steps }. The wrapper owns the
+ * browser client: if the mint switched to it, the browser closes here no
+ * matter how the mint ended. */
+async function mintOne(opts) {
+  const ctx = {};
+  try {
+    return await mintOneInner({ ...opts, ctx });
+  } finally {
+    if (ctx.browserClient) await ctx.browserClient.close().catch(() => {});
+  }
+}
+
+async function mintOneInner({ px, pool, index, total, log, ctx }) {
   const jar = new Jar();
   const steps = {};
   const mail = await makeMailbox(px);
   const password = `Th!${rand(12)}aQ9`;
   log(`[${index}/${total}] mailbox ${mail.address} (${mail.rail})`);
+  // Transport: plain HTTP until the edge challenges, then the browser.
+  let transport = httpTransport(px, jar);
   let ids;
   try {
-    ids = await discover(px, jar);
+    ids = await discover(transport);
   } catch (e) {
     if (!/cloudflare challenge/i.test(e.message)) throw e;
-    // VPN/datacenter exits get the edge challenge instead of the form: load it
-    // once in a real Chrome (same exit, same user agent) and carry the
-    // browser's cookies into this session, then read the form ids over HTTP
-    // as usual. Usually that includes cf_clearance; when the browser passes
-    // without ever facing the interstitial there is none, and the retry
-    // below finds out whether the other cookies are enough.
-    log(`   cloudflare challenge — pre-solving it in the browser via ${px ? `${px.host}:${px.port}` : 'direct'}`);
-    const { presolveChallenge } = require('./solver');
-    const out = await presolveChallenge({ px, log, headless: !!arg('headless', false), ua: UA });
-    if (!out || !out.ok) throw new Error(`cloudflare challenge not solved (${(out && out.why) || 'no response'})`);
-    // The jar currently holds only the challenge response's own cookies —
-    // drop them, or the retry sends the challenge's markers alongside the
-    // clearance. Only what the browser got goes back.
-    jar.clear();
-    for (const c of out.cookies || []) jar.set(c.name, c.value);
-    steps.challenge = out.clearance === false ? 'presolved-no-clearance' : 'presolved';
-    if (out.clearance === false) log('   no cf_clearance from the browser — retrying discover with its cookies anyway');
-    else log('   challenge pre-solved in the browser');
-    const cf = (out.cookies || []).find((c) => c.name === 'cf_clearance');
-    log(`   retrying discover with browser cookies: ${jar.keys().join(', ') || '(none)'}${cf ? ` (cf_clearance ${String(cf.value).length} chars)` : ' (no cf_clearance)'}`);
-    ids = await discover(px, jar);
+    // VPN/datacenter exits get the edge challenge instead of the form. The
+    // clearance cookie alone does not fix that — it is bound to the solving
+    // browser's TLS fingerprint, so Node requests stay challenged even with
+    // a 359-char cf_clearance in the jar (proven 2026-11-19, 8 exits). The
+    // whole rest of this mint therefore runs inside a real Chrome on the
+    // same exit: discover, signup, verify, consent, keys and the live gate
+    // all go through the browser's own fetch.
+    log(`   cloudflare challenge — the clearance only works in the browser, so the rest of this mint runs in Chrome via ${px ? `${px.host}:${px.port}` : 'direct'}`);
+    const { openBrowserClient } = require('./solver');
+    try {
+      ctx.browserClient = await openBrowserClient({ px, log, headless: !!arg('headless', false), ua: UA });
+    } catch (err) {
+      throw new Error(`cloudflare challenge not solved (${err.message.slice(0, 120)})`);
+    }
+    transport = ctx.browserClient;
+    steps.challenge = 'browser';
+    ids = await discover(transport);
   }
   const fp = crypto.randomUUID();
   const tz = await tzFor(px);
-  const pre = await req(`${BASE}/api/auth/signup-precheck?fp=${fp}`, {
-    px,
-    jar,
+  const pre = await transport.req(`${BASE}/api/auth/signup-precheck?fp=${fp}`, {
     headers: { accept: 'application/json', referer: `${BASE}/login?mode=signup` },
   });
   steps.precheck = pre.status;
@@ -616,8 +638,8 @@ async function mintOne({ px, pool, index, total, log }) {
   let refusal = '';
   let askedHuman = needsHuman;
   if (!needsHuman) {
-    res = await submitSignup({ px, jar, ids, fp, tz, email: mail.address, password });
-    session = jar.keys().some((k) => /^sb-auth-auth-token/.test(k));
+    res = await submitSignup({ transport, ids, fp, tz, email: mail.address, password });
+    session = await transport.session();
     steps.signup = res.status;
     refusal = (String(res.text).match(/"error":"([^"]{0,140})"/) || [])[1] || '';
     // Next.js flight answers with references ("error":"$17"); resolve the row.
@@ -640,7 +662,10 @@ async function mintOne({ px, pool, index, total, log }) {
       const hasToken = Boolean(mailtrapToken());
       throw new Error(`signup blocked (${(out && out.why) || 'no response'}) — ${hasToken ? 'the panel is refusing sign-ups from this network; retry through a fresh proxy exit (--pool)' : 'the panel asks for a mailbox it trusts; add a Mailtrap token (mailtrap.txt) and retry'}`);
     }
-    for (const c of out.cookies || []) jar.set(c.name, c.value);
+    // On the HTTP transport this fills the jar; on the browser transport
+    // it puts the session into the browser's own cookie store, where the
+    // API calls below read it from.
+    await transport.setCookies(out.cookies || []);
     steps.signup = 'browser';
     session = true;
   }
@@ -648,12 +673,12 @@ async function mintOne({ px, pool, index, total, log }) {
   // The dashboard beacons every page view (HAR 2026-11-19). The CLI has no
   // send-verification-email call (signup itself sends the mail), so the beacon goes
   // at the equivalent point: session established, before the verification wait.
-  steps.activityDashboard = await activity(px, jar, '/dashboard');
+  steps.activityDashboard = await activity(transport, '/dashboard');
   log(`   activity /dashboard ${steps.activityDashboard}`);
   const link = await waitLink(mail);
   steps.link = Boolean(link);
   if (!link) throw new Error('verification link did not arrive');
-  let r = await req(link, { px, jar, headers: { accept: 'text/html' } });
+  let r = await transport.req(link, { headers: { accept: 'text/html' } });
   steps.verify = r.status;
   log(`   verify ${r.status} ${r.headers.location || ''}`);
   // A finished inbox is dead weight: Mailtrap caps an account at 300.
@@ -665,11 +690,11 @@ async function mintOne({ px, pool, index, total, log }) {
     }
   }
   const loc = r.headers.location;
-  if (loc) await req(loc.startsWith('http') ? loc : BASE + loc, { px, jar, headers: { accept: 'text/html' } }).catch(() => {});
+  if (loc) await transport.req(loc.startsWith('http') ? loc : BASE + loc, { headers: { accept: 'text/html' } }).catch(() => {});
   let consentText;
   let consentSource = 'file';
   try {
-    consentText = await fetchConsentText({ px, jar });
+    consentText = await fetchConsentText(transport);
     consentSource = 'live';
   } catch (e) {
     consentText = fs.readFileSync(CONSENT_TEXT, 'utf8').trim();
@@ -679,9 +704,7 @@ async function mintOne({ px, pool, index, total, log }) {
   log(`   consent text ${consentSource} (${consentText.length} chars)`);
   let consent = 0;
   for (let i = 0; i < 3; i++) {
-    r = await req(`${BASE}/api/me/privacy`, {
-      px,
-      jar,
+    r = await transport.req(`${BASE}/api/me/privacy`, {
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/json', origin: BASE, referer: `${BASE}/dashboard` },
       body: JSON.stringify({ free_models_enabled: true, shown_text: consentText, screen: 'consent_modal', path: '/dashboard' }),
@@ -693,11 +716,9 @@ async function mintOne({ px, pool, index, total, log }) {
   steps.consent = consent;
   log(`   consent ${consent}`);
   if (consent !== 200) throw new Error(`consent ${consent} ${r.text.slice(0, 80)} (shown_text source: ${consentSource} — the panel may have changed its consent text; open the dashboard once and press "Enable free models")`);
-  steps.activityKeysBefore = await activity(px, jar, '/dashboard/api-keys');
+  steps.activityKeysBefore = await activity(transport, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysBefore}`);
-  r = await req(`${BASE}/api/keys`, {
-    px,
-    jar,
+  r = await transport.req(`${BASE}/api/keys`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json', origin: BASE, referer: `${BASE}/dashboard/api-keys` },
     body: JSON.stringify({ label: 'bulk' }),
@@ -706,7 +727,7 @@ async function mintOne({ px, pool, index, total, log }) {
   log(`   key ${r.status}`);
   const key = (r.text.match(/thk_live_[A-Za-z0-9_-]{20,}/) || [])[0];
   if (!key) throw new Error(`key ${r.status} ${r.text.slice(0, 120)}`);
-  steps.activityKeysAfter = await activity(px, jar, '/dashboard/api-keys');
+  steps.activityKeysAfter = await activity(transport, '/dashboard/api-keys');
   log(`   activity /dashboard/api-keys ${steps.activityKeysAfter}`);
   // The account + key exist from here on: save the login so the account can be
   // opened manually in a browser even if the live gate below fails.
@@ -732,7 +753,9 @@ async function mintOne({ px, pool, index, total, log }) {
         for (let t = 0; t < 6 && !c; t++) {
           if (Date.now() - gateStart > GATE_BUDGET_MS) throw new Error('live gate budget exhausted');
           try {
-            c = await req(`${BASE}/v1/chat/completions`, {
+            // In browser mode the px below is ignored: the browser is bound
+            // to this mint's exit, so the gate runs through that one exit.
+            c = await transport.req(`${BASE}/v1/chat/completions`, {
               px: STRICT ? (pool && pool.length ? pool[Math.floor(Math.random() * pool.length)] : null) : t < 2 && pool && pool.length ? pool[Math.floor(Math.random() * pool.length)] : null,
               method: 'POST',
               headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },

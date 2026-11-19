@@ -172,10 +172,11 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    `x-deployment-id`) are read from the live page every run, so a panel redeploy does not break
    the CLI; the device fingerprint and the timezone travel with the request, and the timezone is
    measured from the exit, not from your machine. If Cloudflare answers the login page with its
-   edge challenge (`Just a moment...`, common on VPN/datacenter exits), a real Chrome
-   loads it first and the browser's cookies are carried into the HTTP session
-   (usually including cf_clearance; if the browser passes without facing the
-   interstitial, the retry proceeds with whatever cookies it got).
+   edge challenge (`Just a moment...`, common on VPN/datacenter exits), the rest of the mint
+   runs inside a real Chrome on the same exit: every request (discover, signup, verify,
+   consent, keys, live gate) goes through the browser's own fetch, because the clearance
+   cookie alone is not enough — `cf_clearance` is bound to the solving browser's TLS
+   fingerprint, and Node requests stay challenged even with a valid cookie in the jar.
    For SOCKS exits with a username, Chrome goes through a localhost forwarding
    proxy (`src/local-proxy.js`) instead of talking SOCKS itself, because Chrome's
    SOCKS5-auth handling hangs.
@@ -213,7 +214,7 @@ node src/cli.js --help
 | `--count <n>` | accounts (and keys) to create, default 1 |
 | `--pool <file>` | proxy list, one exit per line (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); inline `#` comments are fine |
 | `--headless` | run the fallback browser headless (default: off-screen window, which is what the captcha expects) |
-| `--screen` | test the pool against the panel and print live / challenged (cloudflare) / dead per exit; challenged exits can still mint, the challenge is pre-solved in Chrome |
+| `--screen` | test the pool against the panel and print live / challenged (cloudflare) / dead per exit; challenged exits can still mint, the mint runs in Chrome on them |
 | `--verify` | live-verify `keys.txt`; dead keys are written to `keys-dead.txt` |
 | `--models` | print the free model ids |
 | `--strict-proxy` | never send a direct request: the live gate must also go through the pool (env `TOKENHARBOR_STRICT=1` does the same) |
