@@ -15,8 +15,8 @@
  *   modal does) → API key (activity beacons before and after) → live chat-200.
  *
  * When the panel answers "complete the human check", the signup is replayed in a real
- * Chrome (src/solver.js, puppeteer-core, your installed Chrome) and the CLI continues
- * over HTTP with that browser's session.
+ * browser (src/solver.js, puppeteer-core, your installed Chrome or Brave) and the CLI
+ * continues over HTTP with that browser's session.
  *
  * When Cloudflare answers the login page with its edge challenge ("Just a moment..."),
  * a real Chrome pre-solves it first and the clearance cookie is carried into the

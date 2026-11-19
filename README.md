@@ -174,10 +174,10 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    measured from the exit, not from your machine. If Cloudflare answers the login page with its
    edge challenge (`Just a moment...`, common on VPN/datacenter exits), a real Chrome
    pre-solves it first and the clearance cookie is carried into the HTTP session.
-3. **Human check** — when the panel renders the widget, the sign-up is replayed in a real Chrome
-   (`src/solver.js`, `puppeteer-core` + the Chrome already installed; `--enable-automation` is
-   suppressed on purpose), the checkbox is clicked with the mouse, and that browser's session
-   cookies are handed back to the CLI.
+3. **Human check** — when the panel renders the widget, the sign-up is replayed in a real browser
+   (`src/solver.js`, `puppeteer-core` + the Chrome or Brave already installed, or the path in
+   `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` is suppressed on purpose), the checkbox
+   is clicked with the mouse, and that browser's session cookies are handed back to the CLI.
 4. **E-mail verification** — the link from the mailbox is opened; the token is consumed
    server-side and answers `307 → /dashboard?verify=success`. Right after sign-up, the CLI
    also sends the dashboard's page-view beacon (`POST /api/auth/activity?page=%2Fdashboard`).

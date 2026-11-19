@@ -7,18 +7,60 @@
  * the page's own state are what make it pass — nothing is pasted and no captcha
  * service is called.
  *
- * Chrome comes from `puppeteer-core` + the Chrome already installed on the machine
- * (`channel: 'chrome'`); `--enable-automation`, which puppeteer adds by default and
- * which Turnstile reads first, is suppressed on purpose.
+ * The browser comes from `puppeteer-core` + the Chrome or Brave already installed
+ * on the machine (`channel: 'chrome'`, then well-known install paths, then the
+ * `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` / `BRAVE_PATH` env override);
+ * `--enable-automation`, which puppeteer adds by default and which Turnstile reads
+ * first, is suppressed on purpose.
  *
  * It also pre-solves Cloudflare's edge challenge page ("Just a moment..."):
  * presolveChallenge() loads the login page in Chrome, waits for the challenge to
  * clear, and returns the clearance cookies for the CLI's HTTP session.
  */
+const fs = require('fs');
 const BASE = 'https://tokenharbor.ai';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function launchBrowser({ px = null, headless = false } = {}) {
+/** Find a Chromium executable: explicit env override first, then well-known
+ * install locations. Brave is Chromium, puppeteer-core drives it the same way. */
+function findBrowserExecutable() {
+  for (const v of ['PUPPETEER_EXECUTABLE_PATH', 'CHROME_PATH', 'BRAVE_PATH']) {
+    const p = process.env[v];
+    if (p && fs.existsSync(p)) return p;
+  }
+  const candidates = [];
+  if (process.platform === 'win32') {
+    const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+    const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const local = process.env['LOCALAPPDATA'] || '';
+    candidates.push(
+      `${pf}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${local}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${pf86}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${pf}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${pf86}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${local}\\Google\\Chrome\\Application\\chrome.exe`
+    );
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    );
+  } else {
+    candidates.push('/usr/bin/brave-browser', '/usr/bin/brave', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser');
+  }
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (e) {
+      /* next candidate */
+    }
+  }
+  return null;
+}
+
+async function launchBrowser({ px = null, headless = false } = {}) {
   const puppeteer = require('puppeteer-core');
   const args = ['--no-first-run', '--no-default-browser-check', '--window-size=1280,900', '--lang=en-US', '--mute-audio'];
   if (px) {
@@ -26,14 +68,20 @@ function launchBrowser({ px = null, headless = false } = {}) {
     args.push(`--proxy-server=${scheme}://${px.host}:${px.port}`);
   }
   const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
-  return puppeteer
-    .launch({ ...options, channel: 'chrome' })
-    .catch(() => puppeteer.launch(options))
-    .catch((e) => {
-      throw new Error(
-        `Chrome not found (${e.message}). Install Chrome, or run: npx puppeteer browsers install chrome`
-      );
-    });
+  const attempts = [{ ...options, channel: 'chrome' }];
+  const exe = findBrowserExecutable();
+  if (exe) attempts.push({ ...options, executablePath: exe });
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      return await puppeteer.launch(attempt);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(
+    `No browser found (${lastErr ? lastErr.message : 'none'}). Install Chrome or Brave, set BRAVE_PATH/CHROME_PATH to the browser executable, or run: npx puppeteer browsers install chrome`
+  );
 }
 
 async function proxyAuth(page, px) {
@@ -271,4 +319,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable };
