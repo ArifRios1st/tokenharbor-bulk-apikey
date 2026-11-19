@@ -234,6 +234,19 @@ that proxy stage by stage, then the browser through the same exit (hostname, res
 IPv4, and `--disable-http2`), then the browser direct, and prints a verdict naming the
 slow part. Credentials in the pool line are used and never printed.
 
+If the mint reaches the live gate but the chat call times out, test a saved key
+directly — it also tells you whether the key itself is live:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+It opens the same browser client the mint uses, calls `/v1/chat/completions`
+with the gate's exact prompt, and streams the response body, logging when the
+headers arrive, when each chunk arrives, and whether the stream ever ends —
+so a slow model, a trickling stream, and a stuck endpoint look different.
+The key is read from `keys-unverified.txt` (fallback `keys.txt`) and never printed.
+
 ## 🛰️ Behind a proxy
 
 The CLI runs **direct** by default. Put one exit per line in `proxies.txt` (the launcher picks

@@ -752,6 +752,7 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
         let c = null;
         for (let t = 0; t < 6 && !c; t++) {
           if (Date.now() - gateStart > GATE_BUDGET_MS) throw new Error('live gate budget exhausted');
+          const attemptStart = Date.now();
           try {
             // In browser mode the px below is ignored: the browser is bound
             // to this mint's exit, so the gate runs through that one exit.
@@ -760,9 +761,13 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
               method: 'POST',
               headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
               body: JSON.stringify({ model, messages: [{ role: 'user', content: q }], max_tokens: 64 }),
-              timeoutMs: 60000,
+              // Free-route answers can take well over a minute under load
+              // (six 60s timeouts in a row on 2026-11-19); the gate budget
+              // still bounds the total time per account.
+              timeoutMs: 180000,
             });
           } catch (e) {
+            log(`   chat attempt ${t + 1} failed after ${Math.round((Date.now() - attemptStart) / 1000)}s (${e.name || 'error'}: ${String(e.message || '').replace(/\s+/g, ' ').slice(0, 80)})`);
             if (t === 5) throw e;
             continue;
           }

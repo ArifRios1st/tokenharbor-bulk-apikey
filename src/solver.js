@@ -457,6 +457,8 @@ async function browserFetchInPage({ url, method = 'GET', headers = {}, body = nu
  *   setCookies(cookies) -> puts cookies (e.g. from the signup fallback)
  *     into the browser store so later requests carry them
  *   cookies() -> the page's cookies
+ *   evaluate(fn, arg) -> raw page.evaluate, for diagnostics (the chat-gate
+ *     probe streams a response body through it); the mint only uses req()
  *   close() -> closes the browser
  */
 function browserClientFromPage(page, browser) {
@@ -486,6 +488,9 @@ function browserClientFromPage(page, browser) {
     },
     cookies() {
       return page.cookies();
+    },
+    evaluate(fn, arg) {
+      return page.evaluate(fn, arg);
     },
     async close() {
       await browser.close().catch(() => {});
