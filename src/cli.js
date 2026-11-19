@@ -499,6 +499,24 @@ async function logFreeTier(transport, log) {
   }
 }
 
+// Parse a chat response for the panel's rate limit. The panel answers a rate
+// limit as HTTP 429, or as HTTP 200 + {"error":{"code":"rate_limit_exceeded",
+// "message":"… in N s."}} (measured 2026-11-09), so a status check alone
+// burns every retry on an exhausted window. Returns null when the response
+// is not a rate limit, else { wait, detail }: the wait in seconds (at least
+// 25, from the panel's "in N s"), and a detail string naming the form plus
+// the panel's message — the message can name the scope (per-IP, per-key,
+// per-account), which is what the gate log needs to show.
+function rateLimitInfo(c) {
+  const text = String((c && c.text) || '');
+  const limited = c.status === 429 || (c.status === 200 && /"code"\s*:\s*"rate_limit_exceeded"/.test(text));
+  if (!limited) return null;
+  const wait = Math.max(25, Number((text.match(/in (\d+) s/) || [])[1] || 25));
+  const msg = (text.match(/"message"\s*:\s*"([^"]{0,160})"/) || [])[1] || '';
+  const detail = `${c.status === 429 ? '429' : '200 rate_limit_exceeded'}${msg ? ` — ${msg}` : ''}`;
+  return { wait, detail };
+}
+
 // --- Free-models consent text, read live like the browser does (HAR 2026-11-19) ---
 // The dashboard modal builds shown_text from two live sources and POSTs the modal's
 // innerText:
@@ -815,13 +833,10 @@ async function mintOneInner({ px, pool, index, total, log, ctx }) {
             if (t === 5) throw e;
             continue;
           }
-          // The panel also answers a rate limit with HTTP 200 + {"error":{"code":"rate_limit_exceeded","message":"… in N s."}}
-          // (measured 2026-11-09), so a status check alone burns every retry on an exhausted window.
-          const limited = c.status === 429 || (c.status === 200 && /"code"\s*:\s*"rate_limit_exceeded"/.test(c.text));
-          if (limited) {
-            const wait = Math.max(25, Number((c.text.match(/in (\d+) s/) || [])[1] || 25));
-            log(`   rate limited — waiting ${wait}s`);
-            await sleep(wait * 1000);
+          const rl = rateLimitInfo(c);
+          if (rl) {
+            log(`   rate limited (${rl.detail}) — waiting ${rl.wait}s`);
+            await sleep(rl.wait * 1000);
             c = null;
           }
         }

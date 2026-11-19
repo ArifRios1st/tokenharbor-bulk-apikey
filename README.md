@@ -227,6 +227,8 @@ node src/cli.js --help
 
 A dying exit never costs an account: sign-up and the live gate both retry on other pool lines,
 and a rate limit (a `429`, or a `200` whose body carries `rate_limit_exceeded`) waits the time the panel names.
+The gate logs the panel's rate-limit message with the wait, so the scope it names (per-IP, per-key,
+per-account) shows in the log instead of a bare "rate limited".
 
 If the browser pre-solve is slow, find out whether it is the exit or the code before tuning
 anything:
