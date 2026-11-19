@@ -129,6 +129,17 @@ function findBrowserExecutable() {
   return null;
 }
 
+/** The --proxy-server value for a pool entry. Credentials ride in the URL:
+ * Chrome authenticates a SOCKS5 proxy from them directly, no dialog and no
+ * CDP round trip. (proxyAuth() below stays as the fallback for proxies that
+ * challenge over HTTP 407.) */
+function proxyServerArg(px) {
+  if (!px) return null;
+  const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
+  const creds = px.username ? `${encodeURIComponent(px.username)}:${encodeURIComponent(px.password || '')}@` : '';
+  return `--proxy-server=${scheme}://${creds}${px.host}:${px.port}`;
+}
+
 async function launchBrowser({ px = null, headless = false, log = null, extraArgs = [] } = {}) {
   const puppeteer = require('puppeteer-core');
   // The background flags matter on slow proxies: without them the browser phones
@@ -148,8 +159,7 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     ...extraArgs,
   ];
   if (px) {
-    const scheme = px.protocol && px.protocol.startsWith('socks') ? 'socks5' : 'http';
-    args.push(`--proxy-server=${scheme}://${px.host}:${px.port}`);
+    args.push(proxyServerArg(px));
   }
   const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
   const attempts = [{ ...options, channel: 'chrome', label: "Chrome (channel 'chrome')" }];
@@ -171,17 +181,20 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
   );
 }
 
-async function proxyAuth(page, px) {
+async function proxyAuth(page, px, log = null) {
   if (!px || !px.username) return;
   const cdp = await page.target().createCDPSession();
   await cdp.send('Fetch.enable', { handleAuthRequests: true });
   cdp.on('Fetch.authRequired', async (e) => {
+    const url = (e.request && e.request.url) || '?';
+    const isProxy = e.authChallenge && e.authChallenge.isProxy;
+    log && log(`   proxy auth challenge (proxy=${!!isProxy}) for ${String(url).slice(0, 80)}`);
     await cdp
       .send('Fetch.continueWithAuth', {
         requestId: e.requestId,
         authChallengeResponse: { response: 'ProvideCredentials', username: px.username, password: px.password || '' },
       })
-      .catch(() => {});
+      .catch((err) => log && log(`   proxy auth continue failed: ${String(err.message).split('\n')[0].slice(0, 120)}`));
   });
 }
 
@@ -264,7 +277,7 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
   const browser = await launchBrowser({ px, headless, log });
   try {
     const page = await browser.newPage();
-    await proxyAuth(page, px);
+    await proxyAuth(page, px, log);
     // Reuse the CLI session's cookies (e.g. cf_clearance from a pre-solved
     // challenge) so the browser does not face the challenge again.
     if (jarCookies.length) {
@@ -375,7 +388,7 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   const t0 = Date.now();
   try {
     const page = await browser.newPage();
-    await proxyAuth(page, px);
+    await proxyAuth(page, px, log);
     if (ua) await page.setUserAgent(ua);
     // Block what the challenge never needs (images, fonts, stylesheets): on a
     // slow exit they eat the bandwidth the challenge scripts need. Only when
@@ -436,4 +449,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, proxyServerArg, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };

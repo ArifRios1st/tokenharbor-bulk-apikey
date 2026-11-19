@@ -262,7 +262,7 @@ async function browserGoto({ px, url, extraArgs = [], label, timeoutMs = 30000 }
     browser = await solver.launchBrowser({ px, headless: false, log: (m) => console.log(`      ${m.trim()}`), extraArgs });
     const launchedMs = Date.now() - t0;
     const page = await browser.newPage();
-    await solver.proxyAuth(page, px);
+    await solver.proxyAuth(page, px, (m) => console.log(`      ${m.trim()}`));
     const g0 = Date.now();
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
