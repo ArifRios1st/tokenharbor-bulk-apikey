@@ -3,7 +3,7 @@
  * diag-browser-proxy.js — is the presolve slowness the proxy or our code?
  *
  *   node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
- *   node scripts/diag-browser-proxy.js --proxy lax.socks.ipvanish.com:1080
+ *   node scripts/diag-browser-proxy.js --proxy host:1080
  *   node scripts/diag-browser-proxy.js --proxy socks5://user:pass@host:1080
  *
  * --pool reads a real pool line and parses it exactly like the CLI does
