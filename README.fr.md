@@ -223,6 +223,7 @@ node src/cli.js --help
 | `--verbose` | affiche le journal par connexion du proxy local (`+conn` / `upstream ok` / `-conn`) ; sans lui, seules les lignes de résultat s'affichent |
 | `--screen` | teste le pool contre le panneau et affiche en direct / défié (cloudflare) / mort par sortie ; les sorties défiées peuvent toujours générer, la génération se déroule dans Chrome sur celles-ci |
 | `--verify` | vérifie en direct `keys.txt` ; les clés mortes sont écrites dans `keys-dead.txt` |
+| `--quota` | affiche l'utilisation du niveau gratuit (`x-th-free-used-pct`) de chaque clé dans `keys.txt` |
 | `--models` | affiche les identifiants des modèles gratuits |
 | `--strict-proxy` | n'envoie jamais de requête directe : le test en direct doit aussi passer par le pool (la variable d'env `TOKENHARBOR_STRICT=1` fait de même) |
 

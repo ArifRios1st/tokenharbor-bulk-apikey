@@ -898,6 +898,7 @@ function printHelp() {
   node src/cli.js --auto --count 5
   node src/cli.js --auto --count 5 --pool proxies.txt
   node src/cli.js --verify        re-check every key in keys.txt with a live chat call
+  node src/cli.js --quota         show the free-tier usage of every key in keys.txt
   node src/cli.js --models        print the free model list
 
 Options
@@ -911,6 +912,49 @@ Options
 
 The CLI writes only the keys that pass a live chat-200 with two different prompts.`);
 }
+// The panel reports the calling key's free-tier usage in the
+// x-th-free-used-pct response header (README: "Headers worth logging").
+// Returns the percentage as a number, or null when the header is absent
+// or unparsable. Header names are lowercase in req() results.
+function usedPctFromHeaders(headers) {
+  const raw = String((headers && headers['x-th-free-used-pct']) || '').trim().replace(/%$/, '');
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function checkQuota(px, log, reqFn = req) {
+  const keys = keysFile();
+  if (!keys.length) throw new Error(`no API keys in ${OUT}`);
+  let shown = 0;
+  for (const key of keys) {
+    const auth = { authorization: `Bearer ${key}` };
+    // GET /v1/models first: if the gateway attaches the usage header there,
+    // the check costs no quota. Otherwise one minimal chat call carries it.
+    let pct = null;
+    let status = 0;
+    const m = await reqFn(`${BASE}/v1/models`, { px, headers: auth, timeoutMs: 30000 }).catch((e) => ({ status: 0, text: e.message }));
+    status = m.status;
+    pct = usedPctFromHeaders(m.headers);
+    if (pct === null && m.status === 200) {
+      const c = await reqFn(`${BASE}/v1/chat/completions`, {
+        px, method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: FREE_MODEL, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 }),
+        timeoutMs: 120000,
+      }).catch((e) => ({ status: 0, text: e.message }));
+      status = c.status;
+      pct = usedPctFromHeaders(c.headers);
+    }
+    const label = `${key.slice(0, 14)}…`.padEnd(17);
+    if (pct !== null) { log(`${label} ${pct}% Usage`); shown++; }
+    else if (status === 429) log(`${label} rate limited`);
+    else if (status === 401 || status === 403) log(`${label} dead (${status})`);
+    else log(`${label} no usage header (${status || 'no response'})`);
+  }
+  log(`${shown}/${keys.length} keys report usage`);
+}
+
 async function verifyKeys(px, log) {
   const keys = keysFile();
   if (!keys.length) throw new Error(`no API keys in ${OUT}`);
@@ -967,6 +1011,10 @@ async function verifyKeys(px, log) {
   }
   if (arg('verify', false)) {
     await verifyKeys(one() || null, log);
+    return;
+  }
+  if (arg('quota', false)) {
+    await checkQuota(one() || null, log);
     return;
   }
   const auto = arg('auto', false) || !process.stdin.isTTY;

@@ -142,6 +142,12 @@ async function verifyFlow(cfg) {
   run(['--verify'], { ['TOKENHARBOR_PROXIES']: cfg.proxyFile });
 }
 
+async function quotaFlow(cfg) {
+  cfg.proxyFile = await ask('Proxy list file', cfg.proxyFile);
+  saveConfig(cfg);
+  run(['--quota'], { ['TOKENHARBOR_PROXIES']: cfg.proxyFile });
+}
+
 async function screenFlow(cfg) {
   cfg.proxyFile = await ask('Proxy list file to screen', cfg.proxyFile);
   saveConfig(cfg);
@@ -201,6 +207,7 @@ async function main() {
   console.log('  5) Help           — CLI options and notes');
   console.log('  6) Connect to 9Router — register the keys in keys.txt with a local 9Router');
   console.log('  7) Connect to OmniRoute — register the keys in keys.txt with a local OmniRoute');
+  console.log('  8) Check quota   — show the free-tier usage of every key in keys.txt');
   console.log('  q) Quit\n');
   const choice = (await ask('Choose', '1')).toLowerCase();
 
@@ -211,6 +218,7 @@ async function main() {
   else if (choice === '5') run(['--help']);
   else if (choice === '6') await connectFlow(cfg);
   else if (choice === '7') await connectFlowOmni(cfg);
+  else if (choice === '8') await quotaFlow(cfg);
   rl.close();
 }
 
