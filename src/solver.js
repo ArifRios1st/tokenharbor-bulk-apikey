@@ -21,6 +21,15 @@ const fs = require('fs');
 const BASE = 'https://tokenharbor.ai';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** True when a navigation error is only a timeout: the page may still be
+ * loading in the background, so the caller can keep watching instead of
+ * failing. A net::ERR_* is a real failure. */
+function isNavigationTimeout(e) {
+  // goto: "Navigation timeout of 30000 ms exceeded"; waits: "Waiting failed:
+  // 30000ms exceeded". A net::ERR_* matches neither.
+  return /timeout|exceeded/i.test(String((e && e.message) || e));
+}
+
 /** Find a Chromium executable: explicit env override first, then well-known
  * install locations. Brave is Chromium, puppeteer-core drives it the same way. */
 function findBrowserExecutable() {
@@ -198,11 +207,14 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
       await page.setCookie(...jarCookies.map((c) => ({ name: c.name, value: c.value, domain: 'tokenharbor.ai', path: '/' }))).catch(() => {});
     }
     try {
-      // 'commit' returns once the response arrives; the selector wait below covers
-      // the rest. 'domcontentloaded' on a slow exit burns the whole timeout here.
-      await page.goto(`${BASE}/signup`, { waitUntil: 'commit', timeout: 90000 });
+      await page.goto(`${BASE}/signup`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } catch (e) {
-      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+      // A timeout is not a failure: the page keeps loading in the background
+      // and the selector wait below covers it. Only a net::ERR_* fails here.
+      if (!isNavigationTimeout(e)) {
+        return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+      }
+      log && log('   signup page still loading after 60s, watching for the form anyway');
     }
     await page
       .waitForSelector('input[name="email"]', { timeout: 60000 })
@@ -302,13 +314,18 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
     await proxyAuth(page, px);
     if (ua) await page.setUserAgent(ua);
     try {
-      // 'commit' returns once the response arrives; the wait below covers the
-      // challenge itself. 'domcontentloaded' on a slow exit burns the whole
-      // timeout here (the challenge page's scripts all come through the proxy).
-      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'commit', timeout: 60000 });
-      log && log(`   browser + page commit in ${Math.round((Date.now() - t0) / 1000)}s`);
+      // NOTE: 'commit' is not a valid waitUntil for puppeteer-core goto — it
+      // throws "Unknown value for options.waitUntil". domcontentloaded stays,
+      // but its timeout is short and non-fatal (see below).
+      await page.goto(`${BASE}/login?mode=signup`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      log && log(`   browser + page load in ${Math.round((Date.now() - t0) / 1000)}s`);
     } catch (e) {
-      return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+      // A timeout is not a failure: the page keeps loading in the background
+      // and the challenge wait below covers it. Only a net::ERR_* fails here.
+      if (!isNavigationTimeout(e)) {
+        return { ok: false, why: `browser could not load the page (${String(e.message).slice(0, 200)})` };
+      }
+      log && log('   challenge page still loading after 30s, watching for the challenge anyway');
     }
     // The challenge usually clears itself in a few seconds; wait for the real
     // page instead of sleeping a fixed time. If an interactive checkbox shows
@@ -339,4 +356,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable, isNavigationTimeout };
