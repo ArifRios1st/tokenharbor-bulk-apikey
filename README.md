@@ -220,12 +220,13 @@ If the browser pre-solve is slow, find out whether it is the exit or the code be
 anything:
 
 ```bash
-node scripts/diag-browser-proxy.js --proxy lax.socks.ipvanish.com:1080
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
 ```
 
-It times the raw SOCKS5+TLS fetch stage by stage, then the browser through the same exit
-(hostname, resolved IPv4, and `--disable-http2`), then the browser direct, and prints a
-verdict naming the slow part.
+It reads a real pool line (parsed exactly like the CLI does), times the raw fetch over
+that proxy stage by stage, then the browser through the same exit (hostname, resolved
+IPv4, and `--disable-http2`), then the browser direct, and prints a verdict naming the
+slow part. Credentials in the pool line are used and never printed.
 
 ## 🛰️ Behind a proxy
 

@@ -2,13 +2,18 @@
 /*
  * diag-browser-proxy.js — is the presolve slowness the proxy or our code?
  *
+ *   node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
  *   node scripts/diag-browser-proxy.js --proxy lax.socks.ipvanish.com:1080
- *   node scripts/diag-browser-proxy.js --proxy host:port --target https://tokenharbor.ai/login?mode=signup
+ *   node scripts/diag-browser-proxy.js --proxy socks5://user:pass@host:1080
+ *
+ * --pool reads a real pool line and parses it exactly like the CLI does
+ * (bare host:port is an HTTP proxy; socks5:// is SOCKS5; user:pass is kept).
+ * Credentials are never printed.
  *
  * Phases:
- *   A. Raw SOCKS5 + TLS GET (the CLI's own path) with per-stage timings:
- *      TCP connect, SOCKS handshake, CONNECT, TLS handshake, first byte.
- *   B. Browser + proxy (hostname, as real runs do): example.com, then target.
+ *   A. Raw fetch over the parsed proxy (SOCKS5 handshake or HTTP CONNECT,
+ *      then TLS + GET) with per-stage timings.
+ *   B. Browser + the same proxy: example.com, then target.
  *   C. If B is slow: browser + proxy with the resolved IPv4 literal, so a
  *      slow/broken DNS or IPv6 path for the proxy hostname is ruled out.
  *   D. If C is still slow: browser + proxy with --disable-http2, so a broken
@@ -19,6 +24,7 @@
  * mints anything; it only loads pages and reads their titles.
  */
 const dns = require('dns');
+const fs = require('fs');
 const net = require('net');
 const tls = require('tls');
 const solver = require('../src/solver.js');
@@ -28,6 +34,8 @@ const arg = (name, def = null) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
 };
+const POOL = arg('--pool');
+const EXIT = Number(arg('--exit', '0'));
 const PROXY = arg('--proxy');
 const TARGET = arg('--target', 'https://tokenharbor.ai/login?mode=signup');
 const EXAMPLE = arg('--example', 'https://example.com');
@@ -35,6 +43,32 @@ const GOTO_TIMEOUT = Number(arg('--goto-timeout', '30000'));
 const RAW_TIMEOUT = Number(arg('--raw-timeout', '20000'));
 
 const s = (ms) => `${(ms / 1000).toFixed(1)}s`;
+
+/** Same parsing as cli.js parseProxy — keep the two in sync. */
+function parseProxy(line) {
+  const clean = String(line).replace(/\s+#.*$/, '').trim();
+  const m = clean.match(/^(https?|socks5h?):\/\/(?:([^:@/]+):([^@/]*)@)?([^:/]+):(\d+)\/?$/i);
+  if (!m) {
+    const bare = clean.match(/^([^:/]+):(\d+)$/);
+    if (bare) return { protocol: 'http', username: null, password: null, host: bare[1], port: Number(bare[2]) };
+    throw new Error(`bad proxy line: ${String(line).slice(0, 40)}`);
+  }
+  return {
+    protocol: m[1].toLowerCase(),
+    username: m[2] ? decodeURIComponent(m[2]) : null,
+    password: m[3] ? decodeURIComponent(m[3]) : null,
+    host: m[4],
+    port: Number(m[5]),
+  };
+}
+
+function readPool(file) {
+  return fs
+    .readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+}
 
 /** Read exact byte counts off a socket, for the SOCKS handshake. */
 class Reader {
@@ -86,8 +120,42 @@ function onceWithTimeout(emitter, event, ms, what) {
   });
 }
 
-/** Minimal SOCKS5 (no auth) + TLS + HTTP/1.1 GET, mirroring the CLI's tunnel. */
-async function rawFetchViaSocks({ proxyHost, proxyPort, host, port = 443, path = '/', timeoutMs = 20000 }) {
+/** TLS + HTTP/1.1 GET over an already-tunneled socket. Shared by both phases A. */
+async function tlsGet(sock, { host, path, timeoutMs, stages, t0 }) {
+  const tlsSock = tls.connect({ socket: sock, servername: host, ALPNProtocols: ['http/1.1'] });
+  await onceWithTimeout(tlsSock, 'secureConnect', timeoutMs, 'TLS handshake');
+  stages.tlsMs = Date.now() - t0;
+  tlsSock.write(`GET ${path} HTTP/1.1\r\nhost: ${host}\r\nuser-agent: diag/1.0\r\naccept: text/html\r\nconnection: close\r\n\r\n`);
+  const head = await new Promise((resolve, reject) => {
+    let data = Buffer.alloc(0);
+    const timer = setTimeout(() => reject(new Error('no response bytes within timeout')), timeoutMs);
+    tlsSock.on('data', (c) => {
+      if (stages.firstByteMs === undefined) stages.firstByteMs = Date.now() - t0;
+      data = Buffer.concat([data, c]);
+      if (data.length > 8192 || data.includes('\r\n\r\n')) {
+        clearTimeout(timer);
+        resolve(data);
+      }
+    });
+    tlsSock.once('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    tlsSock.once('end', () => {
+      clearTimeout(timer);
+      resolve(data);
+    });
+  });
+  return {
+    status: head.toString('utf8', 0, 200).split('\r\n')[0],
+    bytes: head.length,
+    challenge: head.includes('Just a moment') || head.includes('cf-challenge'),
+    alpn: tlsSock.alpnProtocol || null,
+  };
+}
+
+/** SOCKS5 (no-auth, or username/password subnegotiation) + TLS + GET. */
+async function rawFetchViaSocks({ proxyHost, proxyPort, host, port = 443, path = '/', username = null, password = null, timeoutMs = 20000 }) {
   const t0 = Date.now();
   const stages = {};
   const sock = net.connect(proxyPort, proxyHost);
@@ -103,10 +171,21 @@ async function rawFetchViaSocks({ proxyHost, proxyPort, host, port = 443, path =
     await onceWithTimeout(sock, 'connect', timeoutMs, 'TCP connect to proxy');
     stages.tcpMs = Date.now() - t0;
     const reader = new Reader(sock);
-    sock.write(Buffer.from([0x05, 0x01, 0x00])); // VER, 1 method, no auth
+    const methods = username ? [0x00, 0x02] : [0x00];
+    sock.write(Buffer.from([0x05, methods.length, ...methods]));
     const hs = await reader.read(2);
-    if (hs[0] !== 0x05 || hs[1] !== 0x00) {
-      return finish({ ok: false, stage: 'socks-handshake', error: `proxy picked method ${hs[1]} (auth required?)` });
+    if (hs[0] !== 0x05 || hs[1] === 0xff) {
+      return finish({ ok: false, stage: 'socks-handshake', error: `proxy picked method ${hs[1]} (no acceptable auth — credentials required?)` });
+    }
+    if (hs[1] === 0x02) {
+      const u = Buffer.from(username || '');
+      const p = Buffer.from(password || '');
+      sock.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+      const ar = await reader.read(2);
+      if (ar[0] !== 0x01 || ar[1] !== 0x00) {
+        return finish({ ok: false, stage: 'socks-auth', error: 'proxy rejected the username/password' });
+      }
+      stages.authMs = Date.now() - t0;
     }
     stages.socksMs = Date.now() - t0;
     const hostBuf = Buffer.from(host);
@@ -122,33 +201,55 @@ async function rawFetchViaSocks({ proxyHost, proxyPort, host, port = 443, path =
     if (restLen) await reader.read(restLen);
     stages.connectMs = Date.now() - t0;
     reader.detach();
-    const tlsSock = tls.connect({ socket: sock, servername: host, ALPNProtocols: ['http/1.1'] });
-    await onceWithTimeout(tlsSock, 'secureConnect', timeoutMs, 'TLS handshake');
-    stages.tlsMs = Date.now() - t0;
-    tlsSock.write(`GET ${path} HTTP/1.1\r\nhost: ${host}\r\nuser-agent: diag/1.0\r\naccept: text/html\r\nconnection: close\r\n\r\n`);
+    const r = await tlsGet(sock, { host, path, timeoutMs, stages, t0 });
+    return finish({ ok: true, ...r });
+  } catch (e) {
+    return finish({ ok: false, stage: 'error', error: String((e && e.message) || e).split('\n')[0].slice(0, 160) });
+  }
+}
+
+/** HTTP CONNECT tunnel (+ Proxy-Authorization when given) + TLS + GET. */
+async function rawFetchViaHttpConnect({ proxyHost, proxyPort, host, port = 443, path = '/', username = null, password = null, timeoutMs = 20000 }) {
+  const t0 = Date.now();
+  const stages = {};
+  const sock = net.connect(proxyPort, proxyHost);
+  const finish = (r) => {
+    try {
+      sock.destroy();
+    } catch (e) {
+      /* already gone */
+    }
+    return { ...r, stages, ms: Date.now() - t0 };
+  };
+  try {
+    await onceWithTimeout(sock, 'connect', timeoutMs, 'TCP connect to proxy');
+    stages.tcpMs = Date.now() - t0;
+    const auth = username ? `Proxy-Authorization: Basic ${Buffer.from(`${username}:${password || ''}`).toString('base64')}\r\n` : '';
+    sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
     const head = await new Promise((resolve, reject) => {
-      let data = Buffer.alloc(0);
-      const timer = setTimeout(() => reject(new Error('no response bytes within timeout')), timeoutMs);
-      tlsSock.on('data', (c) => {
-        if (!stages.firstByteMs) stages.firstByteMs = Date.now() - t0;
-        data = Buffer.concat([data, c]);
-        if (data.length > 8192 || data.includes('\r\n\r\n')) {
+      let buf = Buffer.alloc(0);
+      const timer = setTimeout(() => reject(new Error('no CONNECT response within timeout')), timeoutMs);
+      const onData = (c) => {
+        buf = Buffer.concat([buf, c]);
+        if (buf.includes('\r\n\r\n')) {
           clearTimeout(timer);
-          resolve(data);
+          sock.removeListener('data', onData);
+          resolve(buf.toString('latin1'));
         }
-      });
-      tlsSock.once('error', (e) => {
+      };
+      sock.on('data', onData);
+      sock.once('error', (e) => {
         clearTimeout(timer);
         reject(e);
       });
-      tlsSock.once('end', () => {
-        clearTimeout(timer);
-        resolve(data);
-      });
     });
-    const status = head.toString('utf8', 0, 200).split('\r\n')[0];
-    const challenge = head.includes('Just a moment') || head.includes('cf-challenge');
-    return finish({ ok: true, status, bytes: head.length, challenge, alpn: tlsSock.alpnProtocol || null });
+    stages.connectMs = Date.now() - t0;
+    const statusLine = head.split('\r\n')[0];
+    if (!/^HTTP\/1\.[01] 200/i.test(statusLine)) {
+      return finish({ ok: false, stage: 'http-connect', error: `proxy CONNECT answered: ${statusLine}` });
+    }
+    const r = await tlsGet(sock, { host, path, timeoutMs, stages, t0 });
+    return finish({ ok: true, ...r });
   } catch (e) {
     return finish({ ok: false, stage: 'error', error: String((e && e.message) || e).split('\n')[0].slice(0, 160) });
   }
@@ -161,6 +262,7 @@ async function browserGoto({ px, url, extraArgs = [], label, timeoutMs = 30000 }
     browser = await solver.launchBrowser({ px, headless: false, log: (m) => console.log(`      ${m.trim()}`), extraArgs });
     const launchedMs = Date.now() - t0;
     const page = await browser.newPage();
+    await solver.proxyAuth(page, px);
     const g0 = Date.now();
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
@@ -194,22 +296,45 @@ async function main() {
   const targetUrl = new URL(TARGET);
   const results = {};
 
-  let proxyHost = null;
-  let proxyPort = 1080;
-  if (PROXY) {
-    const m = PROXY.match(/^(?:socks5?:\/\/)?([A-Za-z0-9._-]+)(?::(\d+))?$/);
-    if (!m) {
-      console.log(`bad --proxy value: ${PROXY} (want host:port)`);
+  let px = null;
+  if (POOL) {
+    let lines;
+    try {
+      lines = readPool(POOL);
+    } catch (e) {
+      console.log(`cannot read pool file ${POOL}: ${String(e.message).split('\n')[0]}`);
       process.exit(1);
     }
-    proxyHost = m[1];
-    proxyPort = Number(m[2] || 1080);
+    if (!lines.length) {
+      console.log(`pool ${POOL} is empty`);
+      process.exit(1);
+    }
+    if (EXIT < 0 || EXIT >= lines.length) {
+      console.log(`--exit ${EXIT} out of range (pool has ${lines.length} lines)`);
+      process.exit(1);
+    }
+    px = parseProxy(lines[EXIT]);
+    console.log(`  pool: ${POOL} line ${EXIT + 1}/${lines.length}`);
+  } else if (PROXY) {
+    try {
+      px = parseProxy(PROXY);
+    } catch (e) {
+      console.log(`bad --proxy value: ${e.message} (want host:port or socks5://[user:pass@]host:port)`);
+      process.exit(1);
+    }
+  }
+  if (px) {
+    console.log(`  proxy: ${px.protocol}://${px.host}:${px.port} (auth: ${px.username ? 'yes' : 'no'})`);
   }
 
-  // Phase A — raw path, staged.
-  if (proxyHost) {
-    console.log(`\n[A] raw SOCKS5+TLS GET via ${proxyHost}:${proxyPort}`);
-    const raw = await rawFetchViaSocks({ proxyHost, proxyPort, host: targetUrl.hostname, path: `${targetUrl.pathname}${targetUrl.search}`, timeoutMs: RAW_TIMEOUT });
+  const noBrowser = (r) => r && r.error && r.error.startsWith('launch failed');
+
+  // Phase A — raw path, staged, over the parsed proxy.
+  if (px) {
+    const isSocks = px.protocol.startsWith('socks');
+    console.log(`\n[A] raw ${isSocks ? 'SOCKS5' : 'HTTP CONNECT'}+TLS GET via ${px.host}:${px.port}`);
+    const rawArgs = { proxyHost: px.host, proxyPort: px.port, host: targetUrl.hostname, path: `${targetUrl.pathname}${targetUrl.search}`, username: px.username, password: px.password, timeoutMs: RAW_TIMEOUT };
+    const raw = isSocks ? await rawFetchViaSocks(rawArgs) : await rawFetchViaHttpConnect(rawArgs);
     results.raw = raw;
     if (raw.ok) {
       console.log(`    OK in ${s(raw.ms)} — ${raw.status} (${raw.bytes} bytes, ALPN=${raw.alpn || 'none'}, challenge=${raw.challenge})`);
@@ -217,17 +342,15 @@ async function main() {
       console.log(`    FAILED at ${raw.stage} after ${s(raw.ms)} — ${raw.error}`);
     }
     const st = raw.stages;
-    console.log(`    stages: tcp ${st.tcpMs !== undefined ? s(st.tcpMs) : '—'}, socks ${st.socksMs !== undefined ? s(st.socksMs) : '—'}, connect ${st.connectMs !== undefined ? s(st.connectMs) : '—'}, tls ${st.tlsMs !== undefined ? s(st.tlsMs) : '—'}, first-byte ${st.firstByteMs !== undefined ? s(st.firstByteMs) : '—'}`);
+    const show = (v) => (v !== undefined ? s(v) : '—');
+    console.log(`    stages: tcp ${show(st.tcpMs)}, socks ${show(st.socksMs)}, auth ${show(st.authMs)}, connect ${show(st.connectMs)}, tls ${show(st.tlsMs)}, first-byte ${show(st.firstByteMs)}`);
   } else {
-    console.log('\n[A] skipped (no --proxy given)');
+    console.log('\n[A] skipped (no --pool or --proxy given)');
   }
 
-  const noBrowser = (r) => r && r.error && r.error.startsWith('launch failed');
-
-  // Phase B — browser + proxy, hostname, as real runs do.
-  if (proxyHost) {
-    console.log(`\n[B] browser + proxy ${proxyHost}:${proxyPort} (hostname)`);
-    const px = { protocol: 'socks5:', host: proxyHost, port: proxyPort };
+  // Phase B — browser + the same proxy, as real runs do.
+  if (px) {
+    console.log(`\n[B] browser + proxy ${px.host}:${px.port} (${px.protocol})`);
     const ex = await browserGoto({ px, url: EXAMPLE, label: 'example.com', timeoutMs: GOTO_TIMEOUT });
     showBrowserResult(ex);
     const tg = await browserGoto({ px, url: TARGET, label: 'target', timeoutMs: GOTO_TIMEOUT });
@@ -241,10 +364,10 @@ async function main() {
     } else {
       // Phase C — same proxy by resolved IPv4, if B was slow.
       if (!tg.ok || tg.gotoMs > 15000) {
-        const ip = await dns.promises.lookup(proxyHost, { family: 4 }).then((r) => r.address).catch(() => null);
-        if (ip && ip !== proxyHost) {
-          console.log(`\n[C] browser + proxy ${ip}:${proxyPort} (resolved IPv4, DNS out of the way)`);
-          const tgIp = await browserGoto({ px: { protocol: 'socks5:', host: ip, port: proxyPort }, url: TARGET, label: 'target via IP', timeoutMs: GOTO_TIMEOUT });
+        const ip = await dns.promises.lookup(px.host, { family: 4 }).then((r) => r.address).catch(() => null);
+        if (ip && ip !== px.host) {
+          console.log(`\n[C] browser + proxy ${ip}:${px.port} (resolved IPv4, DNS out of the way)`);
+          const tgIp = await browserGoto({ px: { ...px, host: ip }, url: TARGET, label: 'target via IP', timeoutMs: GOTO_TIMEOUT });
           showBrowserResult(tgIp);
           results.browserProxyIp = tgIp;
         } else {
@@ -255,7 +378,7 @@ async function main() {
       // Phase D — HTTP/2 off, if still slow.
       const last = results.browserProxyIp || results.browserProxy;
       if (!last.ok || last.gotoMs > 15000) {
-        console.log('\n[D] browser + proxy (hostname) with --disable-http2');
+        console.log('\n[D] browser + proxy with --disable-http2');
         const tgH1 = await browserGoto({ px, url: TARGET, label: 'target, http/1.1 only', timeoutMs: GOTO_TIMEOUT, extraArgs: ['--disable-http2'] });
         showBrowserResult(tgH1);
         results.browserProxyH1 = tgH1;
@@ -283,21 +406,32 @@ async function main() {
   const bp = results.browserProxy;
   const bIp = results.browserProxyIp;
   const bH1 = results.browserProxyH1;
-  if (raw && !raw.ok) {
+  const needsAuth =
+    (raw && raw.stage === 'socks-handshake' && /method 255/.test(raw.error || '')) ||
+    (raw && raw.stage === 'http-connect' && / 407/.test(raw.error || ''));
+  if (needsAuth) {
+    console.log('  This exit requires a username/password and none was given. The CLI and the browser both support it — put credentials in the pool line, e.g. socks5://user:pass@host:1080 (URL-encode special characters in the password), then re-run this diag.');
+  } else if (raw && !raw.ok) {
     console.log('  The proxy itself fails the raw fetch — the exit (or the proxy path) is the problem, not the browser code.');
   } else if (raw && raw.ms > 10000) {
     console.log(`  The raw fetch alone takes ${s(raw.ms)} — the exit is slow for everything. The browser needs several round trips through it, so it blows past every timeout. Try another exit.`);
-  } else if (bp && !bp.ok && direct.ok) {
+  } else if (bp && !bp.ok && directOk(results.direct)) {
     if (bIp && bIp.ok) console.log('  Browser+proxy fails but direct works AND the IPv4-literal proxy works — the proxy hostname resolution (DNS/IPv6) is the slow part.');
     else if (bH1 && bH1.ok) console.log('  Browser+proxy fails but direct works AND --disable-http2 fixes it — HTTP/2 through this exit is broken. The fix is launching with --disable-http2.');
     else console.log('  Browser+proxy fails but direct works — the browser path through this exit is the problem (per-connection slowness the CLI avoids with one request). Try another exit, or the pool needs faster exits.');
-  } else if (bp && !bp.ok && !direct.ok) {
+  } else if (bp && !bp.ok && !directOk(results.direct)) {
     console.log('  The browser is slow even direct — not the proxy. Browser, machine, or network outside the proxy.');
-  } else if (bp && bp.ok && direct.ok) {
+  } else if (bp && bp.ok && directOk(results.direct)) {
     console.log('  Everything is fast right now — the slowness does not reproduce on this exit at this moment. Try the exit that was slow, or re-run when it happens.');
+  } else if (!bp && directOk(results.direct)) {
+    console.log('  Direct browsing works; re-run with --pool to test an exit.');
   } else {
     console.log('  Mixed results — compare the timings above; the slow stage names the culprit.');
   }
+}
+
+function directOk(d) {
+  return d && d.ok;
 }
 
 if (require.main === module) {
@@ -307,4 +441,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { rawFetchViaSocks, browserGoto };
+module.exports = { rawFetchViaSocks, rawFetchViaHttpConnect, browserGoto, parseProxy };

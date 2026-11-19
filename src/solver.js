@@ -436,4 +436,4 @@ async function presolveChallenge({ px = null, log = () => {}, headless = false, 
   }
 }
 
-module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
+module.exports = { launchBrowser, solveTurnstile, signupInBrowser, presolveChallenge, proxyAuth, findBrowserExecutable, findPuppeteerChrome, isNavigationTimeout, shouldBlockResource };
