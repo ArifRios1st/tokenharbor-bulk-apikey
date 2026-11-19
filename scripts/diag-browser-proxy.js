@@ -264,12 +264,16 @@ async function browserGoto({ px, url, extraArgs = [], label, timeoutMs = 30000 }
     const page = await browser.newPage();
     await solver.proxyAuth(page, px, (m) => console.log(`      ${m.trim()}`));
     const g0 = Date.now();
+    // page.title() can hang on a wedged page long after goto gave up; cap it
+    // so the reported goto time stays honest.
+    const titleOf = () =>
+      Promise.race([page.title().catch(() => ''), new Promise((r) => setTimeout(() => r(''), 5000))]);
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-      const title = await page.title().catch(() => '');
+      const title = await titleOf();
       return { ok: true, label, launchedMs, gotoMs: Date.now() - g0, title: String(title).slice(0, 60), url: page.url() };
     } catch (e) {
-      const title = await page.title().catch(() => '');
+      const title = await titleOf();
       return { ok: false, label, launchedMs, gotoMs: Date.now() - g0, error: String(e.message).split('\n')[0].slice(0, 120), title: String(title).slice(0, 60), url: page.url() };
     }
   } catch (e) {

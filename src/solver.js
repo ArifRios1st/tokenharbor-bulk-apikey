@@ -17,7 +17,13 @@
  * It also pre-solves Cloudflare's edge challenge page ("Just a moment..."):
  * presolveChallenge() loads the login page in Chrome, waits for the challenge to
  * clear, and returns the clearance cookies for the CLI's HTTP session.
+ *
+ * For SOCKS proxies with a username, the browser never talks SOCKS: Chrome's
+ * SOCKS5-auth handling hangs (no dialog, no CDP event, about:blank until the
+ * navigation timeout), so launchBrowser() starts a localhost forwarding proxy
+ * (src/local-proxy.js) and points Chrome at that instead.
  */
+const { startLocalProxy } = require('./local-proxy');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -158,7 +164,16 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     '--mute-audio',
     ...extraArgs,
   ];
-  if (px) {
+  let localProxy = null;
+  if (px && px.protocol && px.protocol.startsWith('socks') && px.username) {
+    // Chrome's SOCKS5-auth handling hangs (no dialog, no CDP event, the tab
+    // sits on about:blank until the navigation timeout). Node does the same
+    // handshake in under a second, so the browser gets a plain no-auth HTTP
+    // proxy on localhost and this module forwards upstream.
+    localProxy = await startLocalProxy(px);
+    args.push(`--proxy-server=http://127.0.0.1:${localProxy.port}`);
+    log && log(`   local proxy on 127.0.0.1:${localProxy.port} -> ${px.host}:${px.port}`);
+  } else if (px) {
     args.push(proxyServerArg(px));
   }
   const options = { headless, args, ignoreDefaultArgs: ['--enable-automation'], defaultViewport: null };
@@ -171,11 +186,22 @@ async function launchBrowser({ px = null, headless = false, log = null, extraArg
     try {
       const browser = await puppeteer.launch(launchOpts);
       log && log(`   using browser: ${label}`);
+      if (localProxy) {
+        const origClose = browser.close.bind(browser);
+        browser.close = async (...a) => {
+          try {
+            await origClose(...a);
+          } finally {
+            await localProxy.close().catch(() => {});
+          }
+        };
+      }
       return browser;
     } catch (e) {
       lastErr = e;
     }
   }
+  if (localProxy) await localProxy.close().catch(() => {});
   throw new Error(
     `No browser found (${lastErr ? lastErr.message : 'none'}). Install Chrome or Brave, set BRAVE_PATH/CHROME_PATH to the browser executable, or run: npx puppeteer browsers install chrome`
   );
