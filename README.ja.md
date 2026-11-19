@@ -224,7 +224,7 @@ node src/cli.js --help
 | `--verbose` | ローカルプロキシの接続ごとのログ (`+conn` / `upstream ok` / `-conn`) を表示する。これがないと結果の行のみが表示される |
 | `--screen` | プールをパネルに対してテストし、出口ごとに live / challenged (cloudflare) / dead を表示。チャレンジされた出口でもミントは可能で、その場合は Chrome 内でミントが実行される |
 | `--verify` | `keys.txt` をライブ検証。死んだキーは `keys-dead.txt` に書き込まれる |
-| `--quota` | `keys.txt` 内のすべてのキーの無料枠使用量（`x-th-free-used-pct`）を表示 |
+| `--quota` | `keys.txt` 内のすべてのキーの無料枠使用量（`x-th-free-used-pct`）とリセット時刻を表示 |
 | `--models` | 無料モデル ID を表示 |
 | `--strict-proxy` | 直接リクエストを一切送らない: ライブゲートもプール経由でなければならない (環境変数 `TOKENHARBOR_STRICT=1` も同じ) |
 

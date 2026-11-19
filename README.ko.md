@@ -223,7 +223,7 @@ node src/cli.js --help
 | `--verbose` | 로컬 프록시의 연결별 로그(`+conn` / `upstream ok` / `-conn`) 표시; 없으면 결과 줄만 표시 |
 | `--screen` | 풀을 패널에 대해 테스트하고 출구별로 라이브 / 챌린지(cloudflare) / 죽음 출력; 챌린지 출구에서도 민트가 가능하며, 민트는 그 출구의 Chrome에서 실행 |
 | `--verify` | `keys.txt` 라이브 검증; 죽은 키는 `keys-dead.txt`에 기록 |
-| `--quota` | `keys.txt`에 있는 모든 키의 무료 티어 사용량(`x-th-free-used-pct`) 표시 |
+| `--quota` | `keys.txt`에 있는 모든 키의 무료 티어 사용량(`x-th-free-used-pct`)과 리셋 시간 표시 |
 | `--models` | 무료 모델 id 출력 |
 | `--strict-proxy` | 직접 요청을 절대 보내지 않음: 라이브 게이트도 풀을 통과해야 함 (환경 변수 `TOKENHARBOR_STRICT=1`도 동일) |
 

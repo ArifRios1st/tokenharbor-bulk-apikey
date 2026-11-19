@@ -224,7 +224,7 @@ node src/cli.js --help
 | `--verbose` | show the local proxy's per-connection log (`+conn` / `upstream ok` / `-conn`); without it only the outcome lines show |
 | `--screen` | test the pool against the panel and print live / challenged (cloudflare) / dead per exit; challenged exits can still mint, the mint runs in Chrome on them |
 | `--verify` | live-verify `keys.txt`; dead keys are written to `keys-dead.txt` |
-| `--quota` | show the free-tier usage (`x-th-free-used-pct`) of every key in `keys.txt` |
+| `--quota` | show the free-tier usage (`x-th-free-used-pct`) and reset time of every key in `keys.txt` |
 | `--models` | print the free model ids |
 | `--strict-proxy` | never send a direct request: the live gate must also go through the pool (env `TOKENHARBOR_STRICT=1` does the same) |
 

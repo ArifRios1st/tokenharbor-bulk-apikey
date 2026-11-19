@@ -206,7 +206,7 @@ node src/cli.js --help
 | `--verbose` | 显示本地代理的每连接日志（`+conn` / `upstream ok` / `-conn`）；不加时只显示结果行 |
 | `--screen` | 用面板测试代理池，并打印每个出口的 live / challenged (cloudflare) / dead 状态；受挑战的出口仍可生成，生成会在 Chrome 中运行 |
 | `--verify` | 实时验证 `keys.txt`；失效密钥写入 `keys-dead.txt` |
-| `--quota` | 显示 `keys.txt` 中每个密钥的免费套餐使用量（`x-th-free-used-pct`） |
+| `--quota` | 显示 `keys.txt` 中每个密钥的免费套餐使用量（`x-th-free-used-pct`）和重置时间 |
 | `--models` | 打印免费模型 id |
 | `--strict-proxy` | 绝不发送直接请求：实时校验也必须经过代理池（环境变量 `TOKENHARBOR_STRICT=1` 效果相同） |
 

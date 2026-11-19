@@ -223,7 +223,7 @@ node src/cli.js --help
 | `--verbose` | mostrar el registro por conexión del proxy local (`+conn` / `upstream ok` / `-conn`); sin él solo se muestran las líneas de resultado |
 | `--screen` | probar el pool contra el panel e imprimir vivo / desafiado (cloudflare) / muerto por salida; las salidas desafiadas aún pueden crear, la creación se ejecuta en Chrome en ellas |
 | `--verify` | verificar en vivo `keys.txt`; las claves muertas se escriben en `keys-dead.txt` |
-| `--quota` | muestra el uso del nivel gratuito (`x-th-free-used-pct`) de cada clave en `keys.txt` |
+| `--quota` | muestra el uso del nivel gratuito (`x-th-free-used-pct`) y la hora de reinicio de cada clave en `keys.txt` |
 | `--models` | imprimir los ids de los modelos gratuitos |
 | `--strict-proxy` | nunca enviar una solicitud directa: la puerta en vivo también debe pasar por el pool (la variable de entorno `TOKENHARBOR_STRICT=1` hace lo mismo) |
 

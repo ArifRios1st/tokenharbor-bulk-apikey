@@ -923,6 +923,38 @@ function usedPctFromHeaders(headers) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Remaining time as "6d 7h 11m" (leading zero units dropped; under a minute
+// shows seconds). Null when the duration is not a positive number.
+function formatResetIn(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.floor(ms / 1000)}s`;
+}
+
+// The panel reports when the personal 7-day window rolls over in the
+// x-th-free-resets response header (an ISO date or a unix epoch, seconds
+// or milliseconds). Returns the remaining time as "6d 7h 11m", or null
+// when the header is absent, unparsable, or already past.
+function resetInFromHeaders(headers, nowMs = Date.now()) {
+  const raw = String((headers && headers['x-th-free-resets']) || '').trim();
+  if (!raw) return null;
+  let t = null;
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw);
+    t = n < 1e12 ? n * 1000 : n;
+  } else {
+    t = Date.parse(raw);
+  }
+  if (!Number.isFinite(t)) return null;
+  return formatResetIn(t - nowMs);
+}
+
 async function checkQuota(px, log, reqFn = req) {
   const keys = keysFile();
   if (!keys.length) throw new Error(`no API keys in ${OUT}`);
@@ -931,11 +963,14 @@ async function checkQuota(px, log, reqFn = req) {
     const auth = { authorization: `Bearer ${key}` };
     // GET /v1/models first: if the gateway attaches the usage header there,
     // the check costs no quota. Otherwise one minimal chat call carries it.
+    // The reset header is read from whichever response supplied the usage.
     let pct = null;
+    let hdrs = null;
     let status = 0;
     const m = await reqFn(`${BASE}/v1/models`, { px, headers: auth, timeoutMs: 30000 }).catch((e) => ({ status: 0, text: e.message }));
     status = m.status;
     pct = usedPctFromHeaders(m.headers);
+    if (pct !== null) hdrs = m.headers;
     if (pct === null && m.status === 200) {
       const c = await reqFn(`${BASE}/v1/chat/completions`, {
         px, method: 'POST',
@@ -945,9 +980,14 @@ async function checkQuota(px, log, reqFn = req) {
       }).catch((e) => ({ status: 0, text: e.message }));
       status = c.status;
       pct = usedPctFromHeaders(c.headers);
+      if (pct !== null) hdrs = c.headers;
     }
     const label = `${key.slice(0, 14)}…`.padEnd(17);
-    if (pct !== null) { log(`${label} ${pct}% Usage`); shown++; }
+    if (pct !== null) {
+      const reset = resetInFromHeaders(hdrs);
+      log(`${label} ${pct}% Usage${reset ? `   reset in (${reset})` : ''}`);
+      shown++;
+    }
     else if (status === 429) log(`${label} rate limited`);
     else if (status === 401 || status === 403) log(`${label} dead (${status})`);
     else log(`${label} no usage header (${status || 'no response'})`);

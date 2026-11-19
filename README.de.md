@@ -223,7 +223,7 @@ node src/cli.js --help
 | `--verbose` | das Verbindungsprotokoll des lokalen Proxys anzeigen (`+conn` / `upstream ok` / `-conn`); ohne sie werden nur die Ergebniszeilen angezeigt |
 | `--screen` | den Pool gegen das Panel testen und pro Exit live / challenged (cloudflare) / tot ausgeben; challenged Exits können trotzdem minten, das Minting läuft auf ihnen in Chrome |
 | `--verify` | `keys.txt` live verifizieren; tote Schlüssel werden nach `keys-dead.txt` geschrieben |
-| `--quota` | die Free-Tier-Nutzung (`x-th-free-used-pct`) jedes Schlüssels in `keys.txt` anzeigen |
+| `--quota` | die Free-Tier-Nutzung (`x-th-free-used-pct`) und die Reset-Zeit jedes Schlüssels in `keys.txt` anzeigen |
 | `--models` | die IDs der kostenlosen Modelle ausgeben |
 | `--strict-proxy` | niemals eine direkte Anfrage senden: Auch das Live-Gate muss über den Pool laufen (Env `TOKENHARBOR_STRICT=1` bewirkt dasselbe) |
 

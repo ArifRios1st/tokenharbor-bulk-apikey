@@ -171,7 +171,7 @@ node src/cli.js --help
 | `--verbose` | yerel proxy'nin bağlantı başına günlüğünü göster (`+conn` / `upstream ok` / `-conn`); olmadan yalnızca sonuç satırları görünür |
 | `--screen` | havuzu panele karşı test et ve her çıkış için canlı / doğrulama sorulu (cloudflare) / ölü yazdır; doğrulama sorulu çıkışlar yine de oluşturabilir, oluşturma onlarda Chrome içinde çalışır |
 | `--verify` | `keys.txt` dosyasını canlı doğrula; ölü anahtarlar `keys-dead.txt` dosyasına yazılır |
-| `--quota` | `keys.txt` içindeki her anahtarın ücretsiz katman kullanımını (`x-th-free-used-pct`) göster |
+| `--quota` | `keys.txt` içindeki her anahtarın ücretsiz katman kullanımını (`x-th-free-used-pct`) ve sıfırlanma zamanını göster |
 | `--models` | ücretsiz model kimliklerini yazdır |
 | `--strict-proxy` | asla doğrudan istek gönderme: canlı kapı da havuzdan geçmelidir (`TOKENHARBOR_STRICT=1` ortam değişkeni aynısını yapar) |
 
