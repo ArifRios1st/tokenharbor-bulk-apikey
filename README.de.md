@@ -45,8 +45,8 @@ Nach der Registrierung gibt es zwei Hürden, und beide sind leicht zu übersehen
 `:free`-Route antwortet `403 free_models_disabled`, bis die Einwilligung zu den kostenlosen Modellen aktiviert ist —
 und dieser Einwilligungs-Endpunkt **validiert den Text, den der Client angezeigt hat** (`shown_text`), sodass ein bloßes
 `{"free_models_enabled":true}` mit `400 reload_and_retry` antwortet. Diese CLI erledigt all das,
-liest die Next.js-Action-IDs bei jedem Lauf aus der Live-Seite und schreibt nur Schlüssel, die einen
-Live-Chat-200 bestehen.
+liest die Next.js-Action-IDs und den Einwilligungstext bei jedem Lauf aus der Live-Seite und schreibt
+nur Schlüssel, die einen Live-Chat-200 bestehen.
 
 ## 🎁 Kostenloser Tarif — wie viel du bekommst
 
@@ -148,9 +148,16 @@ Ende-zu-Ende gemessen (`node src/cli.js --auto --count 1 --pool proxies.txt`):
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -165,17 +172,36 @@ Ratenlimit erreicht hat), landet in `keys-unverified.txt`, sodass das Konto nie 
    mail.tm / mail.gw sind die Fallback-Schienen.
 2. **Registrierung** — die Next.js-Server-Action-IDs (`next-action`, `$ACTION_KEY`,
    `x-deployment-id`) werden bei jedem Lauf aus der Live-Seite gelesen, sodass ein Redeploy des Panels die
-   CLI nicht bricht; der Geräte-Fingerprint und die Zeitzone gehen mit der Anfrage mit, und die Zeitzone wird
-   vom Exit aus gemessen, nicht von deinem Rechner.
-3. **Human Check** — wenn das Panel das Widget rendert, wird die Registrierung in einem echten Chrome
-   erneut abgespielt (`src/solver.js`, `puppeteer-core` + das bereits installierte Chrome; `--enable-automation` wird
-   absichtlich unterdrückt), das Kontrollkästchen wird mit der Maus angeklickt, und die Session-
-   Cookies dieses Browsers werden an die CLI zurückgegeben.
-4. **E-Mail-Verifizierung** — der Link aus der Mailbox wird geöffnet; das Token wird serverseitig
-   verbraucht und antwortet mit `307 → /dashboard?verify=success`.
-5. **Einwilligung zu kostenlosen Modellen** — `POST /api/me/privacy` mit dem Einwilligungstext, den das Dashboard anzeigt
-   (`src/consent-text.txt`), `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **Schlüssel + Live-Gate** — `POST /api/keys`, dann müssen zwei verschiedene Prompts beide mit 200 und
+   CLI nicht bricht; der Geräte-Fingerprint, die Zeitzone und die Altersbestätigung gehen mit der Anfrage
+   mit, und die Zeitzone wird vom Exit aus gemessen, nicht von deinem Rechner. Wenn Cloudflare die
+   Login-Seite mit ihrer Edge-Challenge beantwortet (`Just a moment...`, häufig bei VPN-/Rechenzentrums-Exits),
+   läuft der Rest des Mintings in einem echten Chrome auf demselben Exit: Jede Anfrage (discover, signup,
+   consent, verify, keys, live gate) geht durch das eigene fetch des Browsers, denn das Clearance-Cookie
+   allein reicht nicht — `cf_clearance` ist an den TLS-Fingerprint des lösenden Browsers gebunden, und
+   Node-Anfragen bleiben auch mit einem gültigen Cookie im Jar herausgefordert. Bei SOCKS-Exits mit
+   Benutzername geht Chrome über einen lokalen Forwarding-Proxy (`src/local-proxy.js`), statt SOCKS selbst
+   zu sprechen, weil Chromes SOCKS5-Auth-Behandlung hängt.
+3. **Human Check** — wenn das Panel das Widget rendert, wird die Registrierung in einem echten Browser
+   erneut abgespielt (`src/solver.js`, `puppeteer-core` + das bereits installierte Chrome oder Brave, oder
+   der Pfad in `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` wird absichtlich unterdrückt), das
+   Kontrollkästchen wird mit der Maus angeklickt, und die Session-Cookies dieses Browsers werden an die
+   CLI zurückgegeben.
+4. **Einwilligung zu kostenlosen Modellen** — `POST /api/me/privacy` mit dem Einwilligungstext, der live
+   aus dem Dashboard gelesen wird: die Einwilligungssätze aus dem Dashboard-JS-Chunk plus die Modellliste
+   aus `GET /api/me/free-tier`, zusammengesetzt genau wie der `innerText` des Browser-Modals
+   (`src/consent-text.txt` ist nur der Fallback, wenn das Live-Auslesen fehlschlägt).
+   `screen: "consent_modal"`, `path: "/dashboard"`. Das läuft vor der E-Mail-Verifizierung, so wie es der
+   Browser tut. Direkt nach der Registrierung sendet die CLI außerdem das Page-View-Beacon des Dashboards
+   (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **E-Mail-Verifizierung** — der Link aus der Mailbox wird geöffnet; das Token wird serverseitig
+   verbraucht und antwortet mit `307 → /dashboard?verify=success`. Das Dashboard-Beacon feuert nach der
+   Verifizierungs-Landeseite erneut, so wie es der Browser tut.
+6. **Schlüssel + Live-Gate** — Aktivitäts-Beacons (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
+   vor und nach `POST /api/keys`. Die Konto-Anmeldedaten (`email:password`) werden in `accounts.txt`
+   gespeichert, sobald der Schlüssel existiert, sodass das Konto auch dann manuell im Browser geöffnet werden
+   kann, wenn das Live-Gate fehlschlägt. Der kostenlose Tarif wird dann einmal gelesen
+   (`GET /api/me/free-tier`) und in einer Zeile protokolliert, sodass der Ratenlimit-Status eines geminteten
+   Kontos sichtbar ist, bevor das Gate läuft. Dann müssen zwei verschiedene Prompts beide mit 200 und
    unterschiedlichem Inhalt antworten, bevor der Schlüssel geschrieben wird.
 
 ## ⚙️ CLI-Optionen
@@ -194,13 +220,41 @@ node src/cli.js --help
 | `--count <n>` | zu erstellende Konten (und Schlüssel), Standard 1 |
 | `--pool <file>` | Proxy-Liste, ein Exit pro Zeile (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); Inline-`#`-Kommentare sind in Ordnung |
 | `--headless` | den Fallback-Browser headless ausführen (Standard: aus, Off-Screen-Fenster, was das Captcha erwartet) |
-| `--screen` | den Pool gegen das Panel testen und pro Exit live/tot ausgeben |
+| `--verbose` | das Verbindungsprotokoll des lokalen Proxys anzeigen (`+conn` / `upstream ok` / `-conn`); ohne sie werden nur die Ergebniszeilen angezeigt |
+| `--screen` | den Pool gegen das Panel testen und pro Exit live / challenged (cloudflare) / tot ausgeben; challenged Exits können trotzdem minten, das Minting läuft auf ihnen in Chrome |
 | `--verify` | `keys.txt` live verifizieren; tote Schlüssel werden nach `keys-dead.txt` geschrieben |
 | `--models` | die IDs der kostenlosen Modelle ausgeben |
 | `--strict-proxy` | niemals eine direkte Anfrage senden: Auch das Live-Gate muss über den Pool laufen (Env `TOKENHARBOR_STRICT=1` bewirkt dasselbe) |
 
 Ein sterbender Exit kostet nie ein Konto: Registrierung und Live-Gate versuchen es beide erneut über andere Pool-Zeilen,
 und bei einem Ratenlimit (ein `429` oder ein `200`, dessen Body `rate_limit_exceeded` enthält) wird die vom Panel genannte Zeit abgewartet.
+Das Gate protokolliert die Ratenlimit-Meldung des Panels mit der Wartezeit, sodass der Umfang, den sie nennt
+(pro IP, pro Schlüssel, pro Konto), im Protokoll erscheint statt eines bloßen „rate limited".
+
+Wenn die Browser-Vorlösung langsam ist, finde erst heraus, ob es am Exit oder am Code liegt, bevor du
+irgendetwas anpasst:
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+Es liest eine echte Pool-Zeile (genau so geparst wie die CLI es tut), misst den rohen Fetch über
+diesen Proxy Stufe für Stufe, dann den Browser über denselben Exit (Hostname, aufgelöste IPv4
+und `--disable-http2`), dann den Browser direkt, und gibt ein Urteil aus, das den langsamen Teil
+benennt. Anmeldedaten in der Pool-Zeile werden verwendet und nie ausgegeben.
+
+Wenn das Minting das Live-Gate erreicht, aber der Chat-Aufruf ein Timeout bekommt, teste einen
+gespeicherten Schlüssel direkt — das sagt dir auch, ob der Schlüssel selbst live ist:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+Es öffnet denselben Browser-Client, den das Minting verwendet, ruft `/v1/chat/completions`
+mit dem exakten Prompt des Gates auf und streamt den Response-Body, wobei protokolliert wird,
+wann die Header ankommen, wann jeder Chunk ankommt und ob der Stream jemals endet — sodass ein
+langsames Modell, ein tröpfelnder Stream und ein hängender Endpunkt unterschiedlich aussehen.
+Der Schlüssel wird aus `keys-unverified.txt` gelesen (Fallback `keys.txt`) und nie ausgegeben.
 
 ## 🛰️ Hinter einem Proxy
 
@@ -225,12 +279,13 @@ Mail-Anbieter ist nicht das Panel), sodass ein langsamer Exit den Mailbox-Schrit
 | `keys-dead.txt` | Schlüssel, die nicht mehr antworten (aus `--verify`) |
 | `keys-unverified.txt` | Schlüssel, deren Live-Gate nicht abgeschlossen werden konnte — das Konto existiert, der Schlüssel ist echt |
 | `accounts.jsonl` | eine Zeile pro Konto: E-Mail + Schrittergebnisse |
+| `accounts.txt` | Konto-Anmeldedaten (`email:password`), eine pro Konto — für die manuelle Anmeldung im Browser |
 | `mailtrap.txt` | dein Mailtrap-API-Token (eine Zeile) |
 | `proxies.txt` | optionale Proxy-Liste |
 | `src/cli.js` | die CLI für Mint / Verify / Screen |
 | `src/launcher.js` | das Menü (`npm start`) |
 | `src/solver.js` | die Browser-Hälfte für das Turnstile-Widget |
-| `src/consent-text.txt` | der Einwilligungstext, den das Panel validiert |
+| `src/consent-text.txt` | Fallback-Einwilligungstext (zuerst wird das Live-Auslesen aus dem Dashboard versucht) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | Router-Konnektoren |
 
 ## 🔌 Mit 9Router verbinden

@@ -45,8 +45,8 @@ Token Harbor は Next.js のパネル (Supabase 認証) で、無料枠は**パ�
 すべての `:free` ルートは `403 free_models_disabled` を返します — しかもその同意エンドポイントは
 **クライアントが表示したテキストを検証する** (`shown_text`) ため、素の
 `{"free_models_enabled":true}` は `400 reload_and_retry` を返します。この CLI はそのすべてを
-行い、実行のたびにライブページから Next.js のアクション ID を読み取り、ライブの chat-200 を
-通過したキーだけを書き込みます。
+行い、実行のたびにライブページから Next.js のアクション ID と同意テキストを読み取り、ライブの
+chat-200 を通過したキーだけを書き込みます。
 
 ## 🎁 無料枠 — どれだけ使えるか
 
@@ -149,9 +149,16 @@ human-check の壁で停止します — だからこそこのファイルは任
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -166,18 +173,37 @@ done
    (`mailtrap.txt`)。公開の mail.tm / mail.gw はフォールバック経路です。
 2. **サインアップ** — Next.js のサーバーアクション ID (`next-action`、`$ACTION_KEY`、
    `x-deployment-id`) は実行のたびにライブページから読み取られるため、パネルの再デプロイで CLI が
-   壊れることはありません。デバイスフィンガープリントとタイムゾーンはリクエストに付随し、
-   タイムゾーンはあなたのマシンではなく出口から測定されます。
-3. **human check** — パネルがウィジェットを描画した場合、サインアップは実際の Chrome で
-   リプレイされます (`src/solver.js`、`puppeteer-core` + 既にインストール済みの Chrome。
-   `--enable-automation` は意図的に抑制されます)。チェックボックスはマウスでクリックされ、
-   そのブラウザのセッション Cookie が CLI に引き渡されます。
-4. **メール認証** — メールボックスからのリンクが開かれます。トークンはサーバー側で消費され、
-   `307 → /dashboard?verify=success` を返します。
-5. **無料モデルの同意** — ダッシュボードが表示する同意テキスト (`src/consent-text.txt`) を
-   伴って `POST /api/me/privacy` を送信。`screen: "consent_modal"`、`path: "/dashboard"`。
-6. **キー + ライブゲート** — `POST /api/keys` の後、2 つの異なるプロンプトが両方とも異なる内容で
-   200 を返さなければキーは書き込まれません。
+   壊れることはありません。デバイスフィンガープリント、タイムゾーン、年齢確認はリクエストに付随し、
+   タイムゾーンはあなたのマシンではなく出口から測定されます。Cloudflare がログインページに
+   エッジチャレンジ (`Just a moment...`、VPN/データセンターの出口でよく見られる) を返した場合、
+   ミントの残りは同じ出口上の実際の Chrome 内で実行されます。すべてのリクエスト (discover、
+   signup、consent、verify、keys、ライブゲート) がブラウザ自身の fetch を通ります。クリアランス
+   Cookie だけでは不十分だからです — `cf_clearance` は解決したブラウザの TLS フィンガープリントに
+   紐付けられており、有効な Cookie が jar にあっても Node のリクエストはチャレンジされたままに
+   なります。ユーザー名付きの SOCKS 出口では、Chrome は SOCKS を直接話すのではなく、localhost の
+   転送プロキシ (`src/local-proxy.js`) を経由します。Chrome の SOCKS5 認証処理がハングするためです。
+3. **human check** — パネルがウィジェットを描画した場合、サインアップは実際のブラウザで
+   リプレイされます (`src/solver.js`、`puppeteer-core` + 既にインストール済みの Chrome または
+   Brave、あるいは `BRAVE_PATH` / `CHROME_PATH` に指定したパス。`--enable-automation` は意図的に
+   抑制されます)。チェックボックスはマウスでクリックされ、そのブラウザのセッション Cookie が CLI に
+   引き渡されます。
+4. **無料モデルの同意** — ダッシュボードからライブで読み取った同意テキストを伴って
+   `POST /api/me/privacy` を送信します。ダッシュボードの JS チャンク内の同意文に
+   `GET /api/me/free-tier` からのモデル一覧を加え、ブラウザのモーダルの `innerText` とまったく
+   同じ形に組み立てます (`src/consent-text.txt` はライブ読み取りに失敗した場合のフォールバックに
+   過ぎません)。`screen: "consent_modal"`、`path: "/dashboard"`。これはブラウザと同じように、
+   メール認証の前に実行されます。サインアップ直後、CLI はダッシュボードのページビュービーコン
+   (`POST /api/auth/activity?page=%2Fdashboard`) も送信します。
+5. **メール認証** — メールボックスからのリンクが開かれます。トークンはサーバー側で消費され、
+   `307 → /dashboard?verify=success` を返します。ダッシュボードのビーコンは、ブラウザと同じように、
+   認証後のランディング後に再び発火します。
+6. **キー + ライブゲート** — `POST /api/keys` の前後にアクティビティビーコン
+   (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`) を送ります。アカウントのログイン情報
+   (`email:password`) はキーが存在する時点ですぐに `accounts.txt` に保存されるため、ライブゲートが
+   失敗してもアカウントをブラウザで手動で開けます。その後、無料枠を 1 回読み取り
+   (`GET /api/me/free-tier`)、1 行でログに記録します。これにより、ゲートが実行される前に
+   ミント済みアカウントのレート制限状態が見えます。その後、2 つの異なるプロンプトが両方とも
+   異なる内容で 200 を返さなければキーは書き込まれません。
 
 ## ⚙️ CLI オプション
 
@@ -195,14 +221,42 @@ node src/cli.js --help
 | `--count <n>` | 作成するアカウント (およびキー) の数、デフォルト 1 |
 | `--pool <file>` | プロキシリスト、1 行に 1 出口 (`http://host:port`、`socks5://user:pass@host:port`、`host:port`)。インラインの `#` コメントも可 |
 | `--headless` | フォールバックブラウザをヘッドレスで実行 (デフォルト: オフスクリーンウィンドウ。キャプチャはこれを期待) |
-| `--screen` | プールをパネルに対してテストし、出口ごとに live/dead を表示 |
+| `--verbose` | ローカルプロキシの接続ごとのログ (`+conn` / `upstream ok` / `-conn`) を表示する。これがないと結果の行のみが表示される |
+| `--screen` | プールをパネルに対してテストし、出口ごとに live / challenged (cloudflare) / dead を表示。チャレンジされた出口でもミントは可能で、その場合は Chrome 内でミントが実行される |
 | `--verify` | `keys.txt` をライブ検証。死んだキーは `keys-dead.txt` に書き込まれる |
 | `--models` | 無料モデル ID を表示 |
 | `--strict-proxy` | 直接リクエストを一切送らない: ライブゲートもプール経由でなければならない (環境変数 `TOKENHARBOR_STRICT=1` も同じ) |
 
 死にかけた出口がアカウントを失わせることはありません: サインアップとライブゲートはどちらも
 プールの他の行でリトライし、レート制限 (`429`、またはボディに `rate_limit_exceeded` を含む
-`200`) はパネルが指定する時間だけ待機します。
+`200`) はパネルが指定する時間だけ待機します。ゲートはパネルのレート制限メッセージを待機時間
+とともにログに記録するため、そこに示されるスコープ (per-IP、per-key、per-account) がログに現れ、
+単なる「rate limited」にはなりません。
+
+ブラウザの事前解決が遅い場合、何かをチューニングする前に、それが出口の問題なのかコードの
+問題なのかを確認してください:
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+実際のプール行 (CLI とまったく同じように解析される) を読み取り、そのプロキシ経由の生の fetch を
+段階ごとに計測し、次に同じ出口経由のブラウザ (ホスト名、解決済み IPv4、`--disable-http2`)、
+そしてブラウザ直接を計測して、遅い部分を特定する判定を表示します。プール行内の認証情報は
+使用されますが、決して表示されません。
+
+ミントがライブゲートに到達したのにチャット呼び出しがタイムアウトする場合、保存済みのキーを
+直接テストしてください — キー自体が生きているかどうかも分かります:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+ミントと同じブラウザクライアントを開き、ゲートとまったく同じプロンプトで
+`/v1/chat/completions` を呼び出し、レスポンスボディをストリーミングします。ヘッダーが届いた
+タイミング、各チャンクが届いたタイミング、ストリームが終了したかどうかを記録するため、遅い
+モデル、少しずつ流れるストリーム、停止したエンドポイントが見分けられます。キーは
+`keys-unverified.txt` (フォールバック `keys.txt`) から読み取られ、決して表示されません。
 
 ## 🛰️ プロキシ経由
 
@@ -228,12 +282,13 @@ Mailtrap アカウントから直接読まれる (メールプロバイダはパ
 | `keys-dead.txt` | 応答しなくなったキー (`--verify` から) |
 | `keys-unverified.txt` | ライブゲートを完了できなかったキー — アカウントは存在し、キーは本物 |
 | `accounts.jsonl` | アカウントごとに 1 行: メール + ステップ結果 |
+| `accounts.txt` | アカウントのログイン情報 (`email:password`)、アカウントごとに 1 行 — ブラウザでの手動ログイン用 |
 | `mailtrap.txt` | あなたの Mailtrap API トークン (1 行) |
 | `proxies.txt` | 任意のプロキシリスト |
 | `src/cli.js` | ミント / 検証 / スクリーニングの CLI |
 | `src/launcher.js` | メニュー (`npm start`) |
 | `src/solver.js` | Turnstile ウィジェット用のブラウザ側部分 |
-| `src/consent-text.txt` | パネルが検証する同意テキスト |
+| `src/consent-text.txt` | フォールバックの同意テキスト (ダッシュボードからのライブ読み取りがまず試される) |
 | `src/connect-9router.js`、`src/connect-omniroute.js` | ルーターコネクタ |
 
 ## 🔌 9Router に接続

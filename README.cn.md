@@ -43,7 +43,7 @@ Token Harbor 是一个 Next.js 面板（Supabase 认证），其免费额度是*
 `403 email_verification_required`；在启用免费模型同意之前，每个 `:free` 路由都会返回
 `403 free_models_disabled`——而这个同意端点**会校验客户端展示的文本**（`shown_text`），所以
 只发送 `{"free_models_enabled":true}` 会得到 `400 reload_and_retry`。本 CLI 会完成所有这些步骤，
-每次运行都从实时页面读取 Next.js 的 action id，并且只写入通过实时 chat-200 校验的密钥。
+每次运行都从实时页面读取 Next.js 的 action id 和同意文本，并且只写入通过实时 chat-200 校验的密钥。
 
 ## 🎁 免费额度 — 你能获得多少
 
@@ -141,9 +141,16 @@ npm start            # 菜单 → 1) Mint keys → 数量 → 完成
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -157,15 +164,28 @@ done
 1. **邮箱** — 在你的 Mailtrap 账户上为每个账户创建全新收件箱（`mailtrap.txt`）；公共的
    mail.tm / mail.gw 是备用通道。
 2. **注册** — 每次运行都从实时页面读取 Next.js 的 server-action id（`next-action`、`$ACTION_KEY`、
-   `x-deployment-id`），因此面板重新部署不会破坏 CLI；设备指纹和时区随请求一起发送，时区是从出口
-   测量的，而不是从你的机器。
-3. **人机验证** — 当面板渲染组件时，注册会在真实 Chrome 中重放（`src/solver.js`、`puppeteer-core`
-   + 已安装的 Chrome；`--enable-automation` 被有意抑制），用鼠标点击复选框，然后该浏览器的会话
-   cookie 会交回给 CLI。
-4. **邮箱验证** — 打开邮箱中的链接；令牌在服务端被消耗，并返回 `307 → /dashboard?verify=success`。
-5. **免费模型同意** — `POST /api/me/privacy`，带上仪表盘展示的同意文本（`src/consent-text.txt`）、
-   `screen: "consent_modal"`、`path: "/dashboard"`。
-6. **密钥 + 实时校验** — `POST /api/keys`，然后两个不同的提示词都必须返回 200 且内容不同，密钥才会被写入。
+   `x-deployment-id`），因此面板重新部署不会破坏 CLI；设备指纹、时区和年龄确认随请求一起发送，
+   时区是从出口测量的，而不是从你的机器。如果 Cloudflare 对登录页返回边缘挑战（`Just a moment...`，
+   在 VPN/数据中心出口上很常见），其余的生成流程会在同一出口上的真实 Chrome 内运行：每个请求
+   （discover、signup、consent、verify、keys、实时校验）都走浏览器自己的 fetch，因为仅凭
+   clearance cookie 不够——`cf_clearance` 绑定了解题浏览器的 TLS 指纹，即使 cookie jar 中有有效
+   cookie，Node 请求仍会受到挑战。对于带用户名的 SOCKS 出口，Chrome 走 localhost 转发代理
+   （`src/local-proxy.js`），而不是自己直接说 SOCKS，因为 Chrome 的 SOCKS5 认证处理会挂起。
+3. **人机验证** — 当面板渲染组件时，注册会在真实浏览器中重放（`src/solver.js`、`puppeteer-core`
+   + 已安装的 Chrome 或 Brave，或 `BRAVE_PATH` / `CHROME_PATH` 中的路径；`--enable-automation`
+   被有意抑制），用鼠标点击复选框，然后该浏览器的会话 cookie 会交回给 CLI。
+4. **免费模型同意** — `POST /api/me/privacy`，带上从仪表盘实时读取的同意文本：仪表盘 JS chunk
+   中的同意句子加上 `GET /api/me/free-tier` 的模型列表，按浏览器弹窗的 `innerText` 原样组装
+   （`src/consent-text.txt` 只是实时读取失败时的备用）。`screen: "consent_modal"`，
+   `path: "/dashboard"`。这一步在邮箱验证之前运行，与浏览器的做法相同。注册后，CLI 还会发送
+   仪表盘的页面浏览信标（`POST /api/auth/activity?page=%2Fdashboard`）。
+5. **邮箱验证** — 打开邮箱中的链接；令牌在服务端被消耗，并返回 `307 → /dashboard?verify=success`。
+   验证落地后，仪表盘信标会再次触发，与浏览器的做法相同。
+6. **密钥 + 实时校验** — 在 `POST /api/keys` 前后发送活动信标
+   （`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`）。密钥一生成，账户登录信息
+   （`email:password`）就会保存到 `accounts.txt`，这样即使实时校验失败，也能在浏览器中手动打开
+   账户。然后读取一次免费额度（`GET /api/me/free-tier`）并以一行日志记录，这样在校验运行前就能
+   看到生成账户的速率限制状态。然后两个不同的提示词都必须返回 200 且内容不同，密钥才会被写入。
 
 ## ⚙️ CLI 选项
 
@@ -183,13 +203,35 @@ node src/cli.js --help
 | `--count <n>` | 要创建的账户（和密钥）数量，默认 1 |
 | `--pool <file>` | 代理列表，每行一个出口（`http://host:port`、`socks5://user:pass@host:port`、`host:port`）；行内 `#` 注释可以 |
 | `--headless` | 以无头模式运行备用浏览器（默认：离屏窗口，这是验证码所期望的） |
-| `--screen` | 用面板测试代理池，并打印每个出口的可用/失效状态 |
+| `--verbose` | 显示本地代理的每连接日志（`+conn` / `upstream ok` / `-conn`）；不加时只显示结果行 |
+| `--screen` | 用面板测试代理池，并打印每个出口的 live / challenged (cloudflare) / dead 状态；受挑战的出口仍可生成，生成会在 Chrome 中运行 |
 | `--verify` | 实时验证 `keys.txt`；失效密钥写入 `keys-dead.txt` |
 | `--models` | 打印免费模型 id |
 | `--strict-proxy` | 绝不发送直接请求：实时校验也必须经过代理池（环境变量 `TOKENHARBOR_STRICT=1` 效果相同） |
 
 出口失效绝不会损失账户：注册和实时校验都会在其他代理池行上重试，速率限制（`429`，或响应体带
-`rate_limit_exceeded` 的 `200`）会等待面板给出的时间。
+`rate_limit_exceeded` 的 `200`）会等待面板给出的时间。校验会把面板的速率限制消息连同等待时间
+记入日志，这样它指出的范围（按 IP、按密钥、按账户）会显示在日志中，而不是光秃秃的一句“rate limited”。
+
+如果浏览器预解很慢，在调优之前先弄清楚是出口的问题还是代码的问题：
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+它读取一条真实的代理池行（解析方式与 CLI 完全相同），分阶段计时通过该代理的原始 fetch，然后
+是同一出口的浏览器（主机名、解析出的 IPv4，以及 `--disable-http2`），再是直连的浏览器，并打印
+指出慢在哪一部分的结论。代理池行中的凭证会被使用但绝不打印。
+
+如果生成到达了实时校验但聊天调用超时，直接测试一个已保存的密钥——它还能告诉你该密钥本身是否有效：
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+它打开与生成相同的浏览器客户端，用校验的精确提示词调用 `/v1/chat/completions`，并流式读取
+响应体，记录响应头到达的时间、每个分块到达的时间以及流是否最终结束——这样慢模型、涓涓细流和卡住
+的端点看起来就不同了。密钥从 `keys-unverified.txt` 读取（备用 `keys.txt`），绝不打印。
 
 ## 🛰️ 在代理后面
 
@@ -212,12 +254,13 @@ socks5://user:pass@10.0.0.5:1080
 | `keys-dead.txt` | 停止响应的密钥（来自 `--verify`） |
 | `keys-unverified.txt` | 实时校验无法完成的密钥——账户存在，密钥真实 |
 | `accounts.jsonl` | 每个账户一行：邮箱 + 步骤结果 |
+| `accounts.txt` | 账户登录信息（`email:password`），每个账户一行——用于手动浏览器登录 |
 | `mailtrap.txt` | 你的 Mailtrap API 令牌（一行） |
 | `proxies.txt` | 可选的代理列表 |
 | `src/cli.js` | 生成 / 验证 / 筛选 CLI |
 | `src/launcher.js` | 菜单（`npm start`） |
 | `src/solver.js` | Turnstile 组件的浏览器部分 |
-| `src/consent-text.txt` | 面板校验的同意文本 |
+| `src/consent-text.txt` | 备用同意文本（优先尝试从仪表盘实时读取） |
 | `src/connect-9router.js`、`src/connect-omniroute.js` | 路由器连接器 |
 
 ## 🔌 连接到 9Router

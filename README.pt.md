@@ -45,7 +45,7 @@ Dois portões ficam após o cadastro e ambos são fáceis de perder: a API respo
 rota `:free` responde `403 free_models_disabled` até que o consentimento para modelos gratuitos seja ativado —
 e esse endpoint de consentimento **valida o texto que o cliente exibiu** (`shown_text`), então um simples
 `{"free_models_enabled":true}` responde `400 reload_and_retry`. Esta CLI faz tudo isso,
-lê os ids de ação do Next.js da página ao vivo em cada execução, e só grava chaves que passam
+lê os ids de ação do Next.js e o texto de consentimento da página ao vivo em cada execução, e só grava chaves que passam
 em um chat-200 ao vivo.
 
 ## 🎁 Nível gratuito — quanto você recebe
@@ -148,9 +148,16 @@ Medido de ponta a ponta (`node src/cli.js --auto --count 1 --pool proxies.txt`):
 [1/1] mailbox th-…@inbound-mailtrap.io (mailtrap)
    precheck 200 · human check no
    signup 200 · session ok
-   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   consent text live (1464 chars)
    consent 200
+   verify 307 https://tokenharbor.ai/dashboard?verify=success
+   activity /dashboard 200
+   activity /dashboard/api-keys 200
    key 201
+   activity /dashboard/api-keys 200
+   free-tier unlocked=false activated=false exhausted=false rpm_limit=1000000 req_used=0 used_pct=0
+   account saved to accounts.txt
   ✔ thk_live_… saved to keys.txt (1/1)
 done
 ```
@@ -165,17 +172,36 @@ limite de taxa) vai para `keys-unverified.txt` para que a conta nunca seja perdi
    trilhos de fallback.
 2. **Cadastro** — os ids de ação do servidor Next.js (`next-action`, `$ACTION_KEY`,
    `x-deployment-id`) são lidos da página ao vivo em cada execução, então um redeploy do painel não quebra
-   a CLI; a impressão digital do dispositivo e o fuso horário viajam com a requisição, e o fuso horário é
-   medido a partir da saída, não da sua máquina.
-3. **Verificação humana** — quando o painel renderiza o widget, o cadastro é reproduzido em um Chrome real
-   (`src/solver.js`, `puppeteer-core` + o Chrome já instalado; `--enable-automation` é
-   suprimido de propósito), a caixa de seleção é clicada com o mouse, e os cookies de sessão desse navegador
+   a CLI; a impressão digital do dispositivo, o fuso horário e a confirmação de idade viajam com a
+   requisição, e o fuso horário é medido a partir da saída, não da sua máquina. Se a Cloudflare
+   responder à página de login com seu desafio de borda (`Just a moment...`, comum em saídas de
+   VPN/datacenter), o restante da criação roda dentro de um Chrome real na mesma saída: cada requisição
+   (discover, signup, consent, verify, keys, portão ao vivo) passa pelo fetch do próprio navegador,
+   porque o cookie de liberação sozinho não basta — o `cf_clearance` está vinculado à impressão digital
+   TLS do navegador que resolveu o desafio, e as requisições Node continuam desafiadas mesmo com um
+   cookie válido no jar. Para saídas SOCKS com nome de usuário, o Chrome passa por um proxy de
+   encaminhamento localhost (`src/local-proxy.js`) em vez de falar SOCKS ele mesmo, porque o tratamento
+   de autenticação SOCKS5 do Chrome trava.
+3. **Verificação humana** — quando o painel renderiza o widget, o cadastro é reproduzido em um navegador real
+   (`src/solver.js`, `puppeteer-core` + o Chrome ou Brave já instalado, ou o caminho em
+   `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` é suprimido de propósito), a caixa de seleção é clicada com o mouse, e os cookies de sessão desse navegador
    são devolvidos à CLI.
-4. **Verificação de e-mail** — o link da caixa postal é aberto; o token é consumido
-   no servidor e responde `307 → /dashboard?verify=success`.
-5. **Consentimento para modelos gratuitos** — `POST /api/me/privacy` com o texto de consentimento que o painel exibe
-   (`src/consent-text.txt`), `screen: "consent_modal"`, `path: "/dashboard"`.
-6. **Chave + portão ao vivo** — `POST /api/keys`, então dois prompts diferentes devem ambos responder 200 com
+4. **Consentimento para modelos gratuitos** — `POST /api/me/privacy` com o texto de consentimento lido ao vivo do
+   painel: as frases de consentimento no chunk JS do painel mais a lista de modelos de
+   `GET /api/me/free-tier`, montadas exatamente como o `innerText` do modal do navegador
+   (`src/consent-text.txt` é apenas o fallback quando a leitura ao vivo falha).
+   `screen: "consent_modal"`, `path: "/dashboard"`. Isso roda antes da verificação de e-mail,
+   como o navegador faz. Logo após o cadastro, a CLI também envia o beacon de visualização de página do
+   painel (`POST /api/auth/activity?page=%2Fdashboard`).
+5. **Verificação de e-mail** — o link da caixa postal é aberto; o token é consumido
+   no servidor e responde `307 → /dashboard?verify=success`. O beacon do painel dispara
+   novamente após a chegada da verificação, como o navegador faz.
+6. **Chave + portão ao vivo** — beacons de atividade (`POST /api/auth/activity?page=%2Fdashboard%2Fapi-keys`)
+   antes e depois do `POST /api/keys`. O login da conta (`email:password`) é salvo em
+   `accounts.txt` assim que a chave existe, para que a conta possa ser aberta manualmente em um
+   navegador mesmo que o portão ao vivo falhe. O nível gratuito é então lido uma vez
+   (`GET /api/me/free-tier`) e registrado em uma linha, para que o estado de limite de taxa de uma conta criada
+   fique visível antes do portão rodar. Então dois prompts diferentes devem ambos responder 200 com
    conteúdo diferente antes que a chave seja gravada.
 
 ## ⚙️ Opções da CLI
@@ -194,13 +220,40 @@ node src/cli.js --help
 | `--count <n>` | contas (e chaves) a criar, padrão 1 |
 | `--pool <file>` | lista de proxies, uma saída por linha (`http://host:port`, `socks5://user:pass@host:port`, `host:port`); comentários inline com `#` são permitidos |
 | `--headless` | executa o navegador de fallback em modo headless (padrão: janela fora da tela, que é o que o captcha espera) |
-| `--screen` | testa o pool contra o painel e imprime vivo/morto por saída |
+| `--verbose` | mostra o log por conexão do proxy local (`+conn` / `upstream ok` / `-conn`); sem ele só as linhas de resultado aparecem |
+| `--screen` | testa o pool contra o painel e imprime vivo / desafiado (cloudflare) / morto por saída; saídas desafiadas ainda conseguem criar, a criação roda no Chrome nelas |
 | `--verify` | verifica ao vivo `keys.txt`; chaves mortas são gravadas em `keys-dead.txt` |
 | `--models` | imprime os ids dos modelos gratuitos |
 | `--strict-proxy` | nunca envia uma requisição direta: o portão ao vivo também deve passar pelo pool (a env `TOKENHARBOR_STRICT=1` faz o mesmo) |
 
 Uma saída que morre nunca custa uma conta: o cadastro e o portão ao vivo ambos tentam novamente em outras linhas do pool,
 e um limite de taxa (um `429`, ou um `200` cujo corpo carrega `rate_limit_exceeded`) espera o tempo que o painel informa.
+O portão registra a mensagem de limite de taxa do painel com o tempo de espera, para que o escopo que ela nomeia (por IP, por chave, por conta) apareça no log em vez de um simples "rate limited".
+
+Se a pré-resolução do navegador estiver lenta, descubra se é a saída ou o código antes de ajustar
+qualquer coisa:
+
+```bash
+node scripts/diag-browser-proxy.js --pool proxies.txt [--exit 0]
+```
+
+Ele lê uma linha real do pool (analisada exatamente como a CLI faz), cronometra o fetch bruto por
+esse proxy etapa por etapa, depois o navegador pela mesma saída (hostname, IPv4 resolvido
+e `--disable-http2`), depois o navegador direto, e imprime um veredito nomeando a
+parte lenta. As credenciais na linha do pool são usadas e nunca impressas.
+
+Se a criação chegar ao portão ao vivo mas a chamada de chat expirar, teste uma chave salva
+diretamente — isso também diz se a própria chave está viva:
+
+```bash
+node scripts/diag-chat-gate.js --pool proxies.txt [--exit 0] [--timeout 300]
+```
+
+Ele abre o mesmo cliente de navegador que a criação usa, chama `/v1/chat/completions`
+com o prompt exato do portão e transmite o corpo da resposta, registrando quando os
+cabeçalhos chegam, quando cada pedaço chega e se o fluxo chega a terminar —
+para que um modelo lento, um fluxo gotejante e um endpoint travado pareçam diferentes.
+A chave é lida de `keys-unverified.txt` (fallback `keys.txt`) e nunca é impressa.
 
 ## 🛰️ Atrás de um proxy
 
@@ -225,12 +278,13 @@ provedor de e-mail não é o painel), então uma saída lenta não pode quebrar 
 | `keys-dead.txt` | chaves que pararam de responder (de `--verify`) |
 | `keys-unverified.txt` | chaves cujo portão ao vivo não pôde terminar — a conta existe, a chave é real |
 | `accounts.jsonl` | uma linha por conta: e-mail + resultados das etapas |
+| `accounts.txt` | logins das contas (`email:password`), um por conta — para login manual no navegador |
 | `mailtrap.txt` | seu token de API do Mailtrap (uma linha) |
 | `proxies.txt` | lista de proxies opcional |
 | `src/cli.js` | a CLI de criação / verificação / triagem |
 | `src/launcher.js` | o menu (`npm start`) |
 | `src/solver.js` | a parte do navegador para o widget Turnstile |
-| `src/consent-text.txt` | o texto de consentimento que o painel valida |
+| `src/consent-text.txt` | texto de consentimento de fallback (a leitura ao vivo do painel é tentada primeiro) |
 | `src/connect-9router.js`, `src/connect-omniroute.js` | conectores de roteador |
 
 ## 🔌 Conectar ao 9Router
