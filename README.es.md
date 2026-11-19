@@ -186,6 +186,7 @@ límite de tasa) termina en `keys-unverified.txt` para que la cuenta nunca se pi
    (`src/solver.js`, `puppeteer-core` + el Chrome o Brave ya instalado, o la ruta en
    `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` se suprime a propósito), la casilla se marca con el ratón, y las cookies de sesión de ese navegador se devuelven
    a la CLI.
+   Un widget que informa "Verification failed" se restablece (mediante la API de Turnstile cuando está disponible, si no, haciendo clic en él) y se reintenta; si los intentos automáticos siguen fallando, la ejecución espera hasta 2 minutos a que un humano resuelva el desafío en la ventana del navegador en lugar de dar la cuenta por perdida (las ejecuciones con `--headless` omiten esa espera).
 4. **Consentimiento de modelos gratuitos** — `POST /api/me/privacy` con el texto de consentimiento leído en vivo desde el
    panel: las frases de consentimiento del chunk JS del panel más la lista de modelos de
    `GET /api/me/free-tier`, ensambladas exactamente como el `innerText` del modal del navegador

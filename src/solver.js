@@ -252,8 +252,17 @@ async function proxyAuth(page, px, log = null) {
   });
 }
 
-/** Click inside the Turnstile iframe with a real mouse until the token appears. */
-async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
+/**
+ * Click inside the Turnstile iframe with a real mouse until the token appears.
+ * A widget that shows "Verification failed" never yields a token until it is
+ * reset, so the failure state is detected (via the challenge iframe's own
+ * text) and the widget is reset before the next attempt instead of burning
+ * the whole wait on a dead widget. When the automated tries are exhausted and
+ * the browser window is visible (manualWaitMs > 0), the user gets a chance to
+ * solve the challenge by hand — the run continues automatically once the
+ * token appears. Headless callers pass manualWaitMs: 0.
+ */
+async function solveTurnstile(page, log, { tries = 5, waitMs = 12000, manualWaitMs = 120000 } = {}) {
   const tokenOf = async () => {
     const v = await page
       .evaluate(() => {
@@ -263,9 +272,37 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
       .catch(() => '');
     return String(v || '');
   };
+  const widgetFailed = async () => {
+    const frames = page.frames().filter((f) => /challenges\.cloudflare\.com/.test(f.url()));
+    for (const f of frames) {
+      const text = await f
+        .evaluate(() => (document.body ? document.body.innerText : ''))
+        .catch(() => '');
+      if (/verification failed|expired/i.test(text)) return true;
+    }
+    return false;
+  };
+  const resetWidget = async () => {
+    return page
+      .evaluate(() => {
+        try {
+          if (window.turnstile && typeof window.turnstile.reset === 'function') {
+            window.turnstile.reset();
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      })
+      .catch(() => false);
+  };
   for (let attempt = 1; attempt <= tries; attempt++) {
     let token = await tokenOf();
     if (token && token.length > 20) return token;
+    if (await widgetFailed()) {
+      const reset = await resetWidget();
+      log && log(`   turnstile verification failed — ${reset ? 'reset via the Turnstile API' : 'clicking the widget to retry'} (attempt ${attempt})`);
+      await sleep(800);
+    }
     // The widget can be inline (no OOPIF) — click the container's checkbox spot.
     const hostBox = await page
       .evaluate(() => {
@@ -317,7 +354,24 @@ async function solveTurnstile(page, log, { tries = 5, waitMs = 12000 } = {}) {
     while (Date.now() - t0 < waitMs) {
       token = await tokenOf();
       if (token && token.length > 20) return token;
+      // A failed widget never recovers on its own — stop waiting and let the
+      // next attempt reset it instead of burning the rest of this wait.
+      if (await widgetFailed()) break;
       await sleep(700);
+    }
+  }
+  // Automated tries exhausted. The browser window is visible, so a human at
+  // the keyboard can still solve it — wait for the token instead of failing.
+  if (manualWaitMs > 0) {
+    log && log(`   turnstile needs a human — solve the challenge in the browser window (waiting up to ${Math.round(manualWaitMs / 1000)}s)`);
+    const t0 = Date.now();
+    while (Date.now() - t0 < manualWaitMs) {
+      await sleep(1000);
+      const token = await tokenOf();
+      if (token && token.length > 20) {
+        log && log('   turnstile solved by hand');
+        return token;
+      }
     }
   }
   return '';
@@ -409,7 +463,7 @@ async function signupInBrowser({ px = null, email, password, log = () => {}, hea
       left = await done();
     }
     if (!left) {
-      const token = await solveTurnstile(page, log);
+      const token = await solveTurnstile(page, log, { manualWaitMs: headless ? 0 : 120000 });
       if (!token) {
         const diag = await page.evaluate(() => ({ widget: !!document.querySelector('.cf-turnstile, [data-sitekey]'), frames: [...document.querySelectorAll('iframe')].map((i) => i.src).filter((s) => /cloudflare/.test(s)).length })).catch(() => ({}));
         return { ok: false, why: `turnstile token never appeared (widget=${diag.widget} cfFrames=${diag.frames})` };
@@ -564,7 +618,7 @@ async function openBrowserClient({ px = null, log = () => {}, headless = false, 
         .then(() => true)
         .catch(() => false);
       if (cleared) break;
-      const token = await solveTurnstile(page, log, { tries: 2, waitMs: 8000 });
+      const token = await solveTurnstile(page, log, { tries: 2, waitMs: 8000, manualWaitMs: headless ? 0 : 120000 });
       log && log(`   challenge checkbox ${token ? 'solved' : 'no token'}`);
       if (!token) break;
     }

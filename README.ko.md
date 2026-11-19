@@ -186,6 +186,7 @@ done
    (`src/solver.js`, `puppeteer-core` + 이미 설치된 Chrome 또는 Brave, 또는 `BRAVE_PATH` /
    `CHROME_PATH`의 경로; `--enable-automation`은 의도적으로 억제됨). 체크박스를 마우스로
    클릭하고, 그 브라우저의 세션 쿠키를 CLI로 넘겨줍니다.
+   "Verification failed"를 보고하는 위젯은 재설정하고(가능하면 Turnstile API로, 아니면 클릭해서) 다시 시도합니다. 자동 시도가 계속 실패하면 계정을 실패 처리하는 대신 브라우저 창에서 사람이 챌린지를 풀 때까지 최대 2분간 기다립니다(`--headless` 실행에서는 이 대기를 건너뜁니다).
 4. **무료 모델 동의** — 대시보드에서 라이브로 읽은 동의 텍스트와 함께
    `POST /api/me/privacy`를 호출합니다. 대시보드 JS 청크의 동의 문장과
    `GET /api/me/free-tier`의 모델 목록을 브라우저 모달의 `innerText`와 정확히 동일하게

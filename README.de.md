@@ -186,6 +186,7 @@ Ratenlimit erreicht hat), landet in `keys-unverified.txt`, sodass das Konto nie 
    der Pfad in `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` wird absichtlich unterdrückt), das
    Kontrollkästchen wird mit der Maus angeklickt, und die Session-Cookies dieses Browsers werden an die
    CLI zurückgegeben.
+   Ein Widget, das „Verification failed" meldet, wird zurückgesetzt (wenn möglich über die Turnstile-API, sonst per Klick) und erneut versucht; wenn die automatischen Versuche weiterhin fehlschlagen, wartet der Lauf bis zu 2 Minuten darauf, dass ein Mensch die Herausforderung im Browserfenster löst, statt das Konto als gescheitert zu werten (`--headless`-Läufe überspringen dieses Warten).
 4. **Einwilligung zu kostenlosen Modellen** — `POST /api/me/privacy` mit dem Einwilligungstext, der live
    aus dem Dashboard gelesen wird: die Einwilligungssätze aus dem Dashboard-JS-Chunk plus die Modellliste
    aus `GET /api/me/free-tier`, zusammengesetzt genau wie der `innerText` des Browser-Modals

@@ -186,6 +186,7 @@ limite de débit) atterrit dans `keys-unverified.txt` afin que le compte ne soit
    `BRAVE_PATH` / `CHROME_PATH` ; `--enable-automation` est
    supprimé volontairement), la case est cochée à la souris, et les cookies de session de ce navigateur sont
    renvoyés à la CLI.
+   Un widget qui signale « Verification failed » est réinitialisé (via l'API Turnstile quand elle est disponible, sinon en cliquant dessus) puis réessayé ; si les tentatives automatiques échouent encore, l'exécution attend jusqu'à 2 minutes qu'un humain résolve le défi dans la fenêtre du navigateur au lieu d'abandonner le compte (les exécutions avec `--headless` sautent cette attente).
 4. **Consentement aux modèles gratuits** — `POST /api/me/privacy` avec le texte de consentement lu en direct depuis le
    tableau de bord : les phrases de consentement dans le chunk JS du tableau de bord plus la liste des modèles depuis
    `GET /api/me/free-tier`, assemblés exactement comme le `innerText` de la modale du navigateur

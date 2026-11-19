@@ -187,6 +187,10 @@ rate limit) lands in `keys-unverified.txt` so the account is never lost.
    (`src/solver.js`, `puppeteer-core` + the Chrome or Brave already installed, or the path in
    `BRAVE_PATH` / `CHROME_PATH`; `--enable-automation` is suppressed on purpose), the checkbox
    is clicked with the mouse, and that browser's session cookies are handed back to the CLI.
+   A widget that reports "Verification failed" is reset (via the Turnstile API when available,
+   otherwise by clicking it) and retried; if the automated tries still fail, the run waits up
+   to 2 minutes for a human to solve the challenge in the browser window instead of failing
+   the account (`--headless` runs skip that wait).
 4. **Free-models consent** — `POST /api/me/privacy` with the consent text read live from the
    dashboard: the consent sentences in the dashboard JS chunk plus the model list from
    `GET /api/me/free-tier`, assembled exactly like the browser modal's `innerText`

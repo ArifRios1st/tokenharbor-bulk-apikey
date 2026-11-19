@@ -174,6 +174,7 @@ done
 3. **人机验证** — 当面板渲染组件时，注册会在真实浏览器中重放（`src/solver.js`、`puppeteer-core`
    + 已安装的 Chrome 或 Brave，或 `BRAVE_PATH` / `CHROME_PATH` 中的路径；`--enable-automation`
    被有意抑制），用鼠标点击复选框，然后该浏览器的会话 cookie 会交回给 CLI。
+   报告 "Verification failed" 的组件会被重置（优先通过 Turnstile API，否则点击它）并重试；如果自动尝试仍然失败，程序会等待最多 2 分钟，让人在浏览器窗口中手动完成验证，而不是直接判定该账号失败（`--headless` 运行时跳过此等待）。
 4. **免费模型同意** — `POST /api/me/privacy`，带上从仪表盘实时读取的同意文本：仪表盘 JS chunk
    中的同意句子加上 `GET /api/me/free-tier` 的模型列表，按浏览器弹窗的 `innerText` 原样组装
    （`src/consent-text.txt` 只是实时读取失败时的备用）。`screen: "consent_modal"`，
